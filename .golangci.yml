@@ -1,0 +1,188 @@
+version: 2
+
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+
+linters:
+  default: all  # In v2, enable-all is replaced with default: all
+  disable:
+    # Deprecated linters that still exist but use modern replacements
+    - wsl              # Use wsl_v5 instead
+    # Linters that require complex configuration
+    - depguard         # Requires allow/deny lists, enable manually if needed
+  settings:
+    govet:
+      enable-all: true  # Enables all 43+ analyzers including disabled-by-default ones
+      settings:
+        printf:
+          funcs:
+            - (github.com/golangci/golangci-lint/pkg/logutils.Log).Infof
+            - (github.com/golangci/golangci-lint/pkg/logutils.Log).Warnf
+            - (github.com/golangci/golangci-lint/pkg/logutils.Log).Errorf
+            - (github.com/golangci/golangci-lint/pkg/logutils.Log).Fatalf
+      check-shadowing: true  # Enable shadow detection
+
+    staticcheck:
+      checks: ["all"]  # Enables all 150+ checks across SA/S/ST/U/QF categories
+
+    errcheck:
+      check-blank: true
+      check-type-assertions: true
+
+    gosec:
+      excludes: []  # Don't exclude any security rules
+      config:
+        G101: # Hardcoded credentials check
+          mode: strict
+
+    revive:
+      enable-default-rules: true
+      rules:
+        - name: exported
+          disabled: false
+        - name: var-naming
+          disabled: false
+        - name: package-comments
+          disabled: false
+        - name: indent-error-flow
+          disabled: false
+        - name: dot-imports
+          disabled: false
+        - name: blank-imports
+          disabled: false
+        - name: context-as-argument
+          disabled: false
+        - name: context-keys-type
+          disabled: false
+        - name: time-naming
+          disabled: false
+        - name: error-return
+          disabled: false
+        - name: error-strings
+          disabled: false
+        - name: error-naming
+          disabled: false
+        - name: increment-decrement
+          disabled: false
+        - name: range
+          disabled: false
+        - name: receiver-naming
+          disabled: false
+        - name: errorf
+          disabled: false
+        - name: early-return
+          disabled: false
+        - name: unexported-return
+          disabled: false
+        - name: unreachable-code
+          disabled: false
+        - name: redefines-builtin-id
+          disabled: false
+        - name: superfluous-else
+          disabled: false
+        - name: unused-parameter
+          disabled: false
+        - name: flag-parameter
+          disabled: false
+        - name: unnecessary-stmt
+          disabled: false
+        - name: atomic
+          disabled: false
+        - name: empty-block
+          disabled: false
+        - name: confusing-naming
+          disabled: false
+        - name: get-return
+          disabled: false
+        - name: modifies-parameter
+          disabled: false
+        - name: confusing-results
+          disabled: false
+        - name: deep-exit
+          disabled: false
+        - name: unused-receiver
+          disabled: false
+        - name: unhandled-error
+          disabled: false
+        - name: cognitive-complexity
+          disabled: false
+          arguments: [15]
+        - name: cyclomatic
+          disabled: false
+          arguments: [15]
+        - name: max-public-structs
+          disabled: false
+          arguments: [10]
+        - name: file-header
+          disabled: true  # Don't enforce file headers by default
+
+    varnamelen:
+      max-distance: 50
+      min-name-length: 2
+      ignore-names:
+        - err
+        - ok
+        - i
+        - j
+        - k
+        - g
+        - v
+        - fn
+        - id
+        - to
+        - fs
+      ignore-type-assert-ok: true
+      ignore-map-index-ok: true
+      ignore-chan-recv-ok: true
+
+    tagliatelle:
+      case:
+        rules:
+          json: snake
+          yaml: kebab
+          xml: camel
+
+    godot:
+      scope: all
+      capital: true
+
+    wsl_v5:
+      allow-cuddle-declarations: false
+      force-err-cuddling: true
+
+    exhaustruct:
+      exclude: []  # Require all struct fields to be initialized
+
+    paralleltest:
+      ignore-missing: false
+
+    nolintlint:
+      allow-unused: false
+      allow-no-explanation: []
+      require-explanation: true
+      require-specific: true
+
+    cyclop:
+      max-complexity: 15
+
+    gocyclo:
+      min-complexity: 15
+
+    gocognit:
+      min-complexity: 15
+
+    nestif:
+      min-complexity: 4
+
+    funlen:
+      lines: 100
+      statements: 50
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  new: false
+  fix: false
