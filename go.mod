@@ -1,4 +1,4 @@
-module github.com/darccio/darna
+module dario.cat/darna
 
 go 1.24.0
 

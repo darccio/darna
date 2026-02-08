@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/darccio/darna/internal/analyzer"
-	"github.com/darccio/darna/internal/graph"
+	"dario.cat/darna/internal/analyzer"
+	"dario.cat/darna/internal/graph"
 )
 
 func TestNewDependencyGraph(t *testing.T) {

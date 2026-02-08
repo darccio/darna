@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/darccio/darna/internal/analyzer"
-	"github.com/darccio/darna/internal/git"
-	"github.com/darccio/darna/internal/graph"
+	"dario.cat/darna/internal/analyzer"
+	"dario.cat/darna/internal/git"
+	"dario.cat/darna/internal/graph"
 )
 
 // Violation represents a violation of the atomic commit rule.

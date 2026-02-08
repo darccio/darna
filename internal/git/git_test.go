@@ -3,7 +3,7 @@ package git_test
 import (
 	"testing"
 
-	"github.com/darccio/darna/internal/git"
+	"dario.cat/darna/internal/git"
 )
 
 func TestFilterGoFiles(t *testing.T) {

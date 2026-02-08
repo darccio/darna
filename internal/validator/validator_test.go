@@ -3,7 +3,7 @@ package validator_test
 import (
 	"testing"
 
-	"github.com/darccio/darna/internal/validator"
+	"dario.cat/darna/internal/validator"
 )
 
 func TestViolation(t *testing.T) {

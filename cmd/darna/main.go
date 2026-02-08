@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/darccio/darna/internal/validator"
+	"dario.cat/darna/internal/validator"
 )
 
 func main() {

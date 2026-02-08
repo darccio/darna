@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/darccio/darna/internal/validator"
+	"dario.cat/darna/internal/validator"
 )
 
 const (

@@ -26,7 +26,7 @@ The `--committable` mode is designed specifically for automatic programming work
 ## Install
 
 ```bash
-go install github.com/darccio/darna/cmd/darna@latest
+go install dario.cat/darna/cmd/darna@latest
 ```
 
 Or build from source:

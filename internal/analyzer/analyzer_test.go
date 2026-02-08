@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/darccio/darna/internal/analyzer"
+	"dario.cat/darna/internal/analyzer"
 )
 
 func TestObjectKind(t *testing.T) {

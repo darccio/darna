@@ -6,7 +6,7 @@ import (
 	"go/token"
 	"go/types"
 
-	"github.com/darccio/darna/internal/analyzer"
+	"dario.cat/darna/internal/analyzer"
 	"golang.org/x/tools/go/packages"
 )
 
