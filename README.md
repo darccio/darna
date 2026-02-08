@@ -55,10 +55,13 @@ Returns exit code 0 if the commit is atomic, 1 if violations are found.
 | `-dir <path>` | Set working directory (default: `.`) |
 | `--committable` | Find the next file that can be committed atomically |
 | `--select` | Alias for `--committable` |
+| `--dependants` | Include direct dependants when using `--committable` |
 
 ### Progressive commit workflow
 
-`--committable` returns unstaged files that have no dependencies on other uncommitted changes - files safe to commit on their own.
+#### Single file mode
+
+`--committable` returns the first independent file (sorted lexicographically by path) that has no dependencies on other uncommitted changes.
 
 ```bash
 while [ -n "$(darna --committable)" ]; do
@@ -66,6 +69,31 @@ while [ -n "$(darna --committable)" ]; do
     git commit -m "feat: add $(darna --committable)"
 done
 ```
+
+#### Committable set mode
+
+`--committable --dependants` returns the first independent file **plus** direct dependants that only depend on that file and committed code.
+
+```bash
+# Commit in larger atomic sets when possible.
+while [ -n "$(darna --committable --dependants)" ]; do
+    FILES=$(darna --committable --dependants)
+    git add $FILES
+    git commit -m "feat: add $FILES"
+done
+```
+
+This mode enables building multi-commit patchsets more efficiently by grouping related changes together while maintaining atomicity.
+
+### Selection algorithm
+
+Files are sorted **lexicographically** by path. The first file that is independent (has no dependencies on other unstaged files) is selected as the base file. When `--dependants` is used, direct dependants are added to the set - files that:
+
+1. Depend on the base file
+2. Are in the changeset (unstaged or untracked)
+3. Have NO dependencies on OTHER changeset files (only the base file + committed code)
+
+Transitive dependants (dependants of dependants) are excluded to maintain atomicity.
 
 ### Git pre-commit hook
 
