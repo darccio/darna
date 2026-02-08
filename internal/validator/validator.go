@@ -198,9 +198,11 @@ func ensureTrailingSlash(dir string) string {
 	return dir
 }
 
-// FindCommittableFiles identifies unstaged files that can be committed independently.
-// Returns relative file paths that have no dependencies on other changeset files.
-func FindCommittableFiles(ctx context.Context, workDir string) ([]string, error) {
+// FindCommittableSet identifies unstaged files that can be committed as a set.
+// Returns the first independent file (sorted lexicographically).
+// If includeDependants is true, also returns direct dependants that only depend on
+// the base file and committed code.
+func FindCommittableSet(ctx context.Context, workDir string, includeDependants bool) ([]string, error) {
 	// Convert workDir to absolute path for proper relative path calculations.
 	absWorkDir, err := filepath.Abs(workDir)
 	if err != nil {
@@ -237,8 +239,8 @@ func FindCommittableFiles(ctx context.Context, workDir string) ([]string, error)
 		dg.AnalyzePackage(pkg)
 	}
 
-	// 6. Find first independent file.
-	return findCommittableFile(dg, candidatesGo, statuses, absWorkDir), nil
+	// 6. Find first independent file and optionally its dependants.
+	return findCommittableSet(dg, candidatesGo, statuses, absWorkDir, includeDependants), nil
 }
 
 // getCandidates extracts files that are candidates for committable selection.
@@ -267,45 +269,84 @@ func getCandidates(absWorkDir string, statuses map[string]git.FileStatus) []stri
 	return candidates
 }
 
-// findCommittableFile finds the first independent file from candidates.
-// Returns a single-element slice with the relative path, or nil if none found.
-func findCommittableFile(
+// findCommittableSet finds the first independent file from candidates.
+// If includeDependants is true, also includes direct dependants.
+// Files are sorted lexicographically by path, and the first independent file is selected.
+// Returns relative paths, or nil if none found.
+//
+//nolint:revive // Internal helper for FindCommittableSet public API.
+func findCommittableSet(
 	dg *graph.DependencyGraph,
 	candidates []string,
 	statuses map[string]git.FileStatus,
 	absWorkDir string,
+	includeDependants bool,
 ) []string {
-	// Sort candidates lexicographically for deterministic output.
-	candidatesCopy := make([]string, len(candidates))
-	copy(candidatesCopy, candidates)
-	candidates = candidatesCopy
-
-	// Use filepath for sorting to ensure consistent path handling.
-	for i := 0; i < len(candidates); i++ {
-		for j := i + 1; j < len(candidates); j++ {
-			if candidates[i] > candidates[j] {
-				candidates[i], candidates[j] = candidates[j], candidates[i]
-			}
-		}
-	}
-
-	// Build changeset map (all files with modifications).
+	sortedCandidates := sortFilesCopy(candidates)
 	changesetFiles := buildChangesetMap(absWorkDir, statuses)
 
 	// Find first independent file.
-	for _, file := range candidates {
+	for _, file := range sortedCandidates {
 		if isIndependent(dg, file, changesetFiles) {
-			// Convert to relative path for output.
-			relPath, err := filepath.Rel(absWorkDir, file)
-			if err != nil {
-				relPath = file
-			}
+			result := buildCommittableSet(dg, file, changesetFiles, includeDependants)
 
-			return []string{relPath}
+			return convertToRelativePaths(result, absWorkDir)
 		}
 	}
 
 	return nil
+}
+
+// sortFilesCopy creates a sorted copy of files lexicographically.
+func sortFilesCopy(files []string) []string {
+	sorted := make([]string, len(files))
+	copy(sorted, files)
+
+	// Use simple bubble sort for deterministic output.
+	for i := range sorted {
+		for j := i + 1; j < len(sorted); j++ {
+			if sorted[i] > sorted[j] {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
+	}
+
+	return sorted
+}
+
+// buildCommittableSet builds the set of committable files starting from baseFile.
+//
+//nolint:revive // Flag parameter acceptable for internal helper.
+func buildCommittableSet(
+	dg *graph.DependencyGraph,
+	baseFile string,
+	changesetFiles map[string]bool,
+	includeDependants bool,
+) []string {
+	result := []string{baseFile}
+
+	if includeDependants {
+		dependants := findDirectDependants(dg, baseFile, changesetFiles)
+		result = append(result, dependants...)
+	}
+
+	return result
+}
+
+// convertToRelativePaths converts absolute paths to relative paths.
+func convertToRelativePaths(absPaths []string, absWorkDir string) []string {
+	result := make([]string, len(absPaths))
+
+	for i, absPath := range absPaths {
+		relPath, err := filepath.Rel(absWorkDir, absPath)
+		if err != nil {
+			relPath = absPath
+		}
+
+		result[i] = relPath
+	}
+
+	return result
 }
 
 // buildChangesetMap tracks which files are in the changeset (modified or untracked).
@@ -366,4 +407,122 @@ func isIndependent(
 	}
 
 	return true
+}
+
+// canCommitWithBase checks if a file can be committed together with baseFile.
+// Returns true if the file ONLY depends on:
+// - baseFile itself
+// - Already committed files (not in changeset).
+func canCommitWithBase(
+	dg *graph.DependencyGraph,
+	file string,
+	baseFile string,
+	changesetFiles map[string]bool,
+) bool {
+	// Get all symbols defined in the file.
+	symbols := dg.FileSyms[file]
+
+	// Check each symbol's transitive dependencies.
+	for _, symID := range symbols {
+		deps := dg.TransitiveDeps(symID)
+		for _, depID := range deps {
+			depSym := dg.Symbols[depID]
+			if depSym == nil {
+				continue // External dependency, skip.
+			}
+
+			depFile := depSym.File
+
+			// Skip if dependency is the file itself (self-reference).
+			if depFile == file {
+				continue
+			}
+
+			// Allow dependencies on the base file.
+			if depFile == baseFile {
+				continue
+			}
+
+			// If dependency is in changeset (excluding baseFile and self), can't commit.
+			if changesetFiles[depFile] {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+// findDirectDependants finds files that:
+// 1. Depend on baseFile
+// 2. Are in the changeset
+// 3. Have NO dependencies on OTHER changeset files (only baseFile + committed).
+func findDirectDependants(
+	dg *graph.DependencyGraph,
+	baseFile string,
+	changesetFiles map[string]bool,
+) []string {
+	dependantFiles := collectDependantFiles(dg, baseFile, changesetFiles)
+	validDependants := filterCommittableWithBase(dg, dependantFiles, baseFile, changesetFiles)
+
+	return sortFilesCopy(validDependants)
+}
+
+// collectDependantFiles finds all files that depend on baseFile and are in the changeset.
+func collectDependantFiles(
+	dg *graph.DependencyGraph,
+	baseFile string,
+	changesetFiles map[string]bool,
+) map[string]bool {
+	dependantFiles := make(map[string]bool)
+	baseSymbols := dg.FileSyms[baseFile]
+
+	for _, baseSymID := range baseSymbols {
+		collectSymbolDependants(dg, baseSymID, baseFile, changesetFiles, dependantFiles)
+	}
+
+	return dependantFiles
+}
+
+// collectSymbolDependants collects files that depend on a specific symbol.
+func collectSymbolDependants(
+	dg *graph.DependencyGraph,
+	baseSymID string,
+	baseFile string,
+	changesetFiles map[string]bool,
+	dependantFiles map[string]bool,
+) {
+	for dependentSymID := range dg.InEdges[baseSymID] {
+		dependentSym := dg.Symbols[dependentSymID]
+		if dependentSym == nil {
+			continue
+		}
+
+		dependentFile := dependentSym.File
+		if dependentFile == baseFile {
+			continue
+		}
+
+		if changesetFiles[dependentFile] {
+			dependantFiles[dependentFile] = true
+		}
+	}
+}
+
+// filterCommittableWithBase filters files to only those committable with baseFile.
+func filterCommittableWithBase(
+	dg *graph.DependencyGraph,
+	dependantFiles map[string]bool,
+	baseFile string,
+	changesetFiles map[string]bool,
+) []string {
+	var result []string
+
+	for file := range dependantFiles {
+		if canCommitWithBase(dg, file, baseFile, changesetFiles) {
+			result = append(result, file)
+		}
+	}
+
+	return result
 }

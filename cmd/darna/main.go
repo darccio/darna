@@ -17,6 +17,7 @@ func main() {
 	workDir := flag.String("dir", ".", "working directory (default: current directory)")
 	committable := flag.Bool("committable", false, "output files that can be committed atomically")
 	selectFlag := flag.Bool("select", false, "alias for --committable")
+	dependants := flag.Bool("dependants", false, "include direct dependants when using --committable")
 
 	flag.Parse()
 
@@ -24,7 +25,7 @@ func main() {
 
 	// Handle committable mode.
 	if *committable || *selectFlag {
-		files, err := validator.FindCommittableFiles(ctx, *workDir)
+		files, err := validator.FindCommittableSet(ctx, *workDir, *dependants)
 		if err != nil {
 			writeString(os.Stderr, "Error: "+err.Error()+"\n")
 			os.Exit(1)

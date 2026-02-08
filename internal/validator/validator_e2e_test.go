@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -16,6 +17,7 @@ const (
 	fileUtilsGo        = "utils.go"
 	fileConsumerGo     = "consumer.go"
 	fileProcessorGo    = "processor.go"
+	fileTypesGo        = "types.go"
 	fileHelperFmtGo    = "helper/formatter.go"
 	fileHelperValidGo  = "helper/validator.go"
 	fileModelsResponse = "models/response.go"
@@ -371,7 +373,7 @@ func TestValidateAtomicCommit_TypeDependency(t *testing.T) {
 	found := false
 
 	for _, v := range violations {
-		if v.StagedFile == "service.go" && v.MissingFile == "types.go" {
+		if v.StagedFile == "service.go" && v.MissingFile == fileTypesGo {
 			found = true
 
 			break
@@ -427,7 +429,7 @@ func TestValidateAtomicCommit_MultipleViolations(t *testing.T) {
 			hasMainToUtils = true
 		}
 
-		if v.StagedFile == "service.go" && v.MissingFile == "types.go" {
+		if v.StagedFile == "service.go" && v.MissingFile == fileTypesGo {
 			hasServiceToTypes = true
 		}
 	}
@@ -1261,7 +1263,7 @@ func TestFindCommittableFiles_IndependentFiles(t *testing.T) {
 	modifyFile(t, filepath.Join(repoDir, "alpha.go"), testComment)
 	modifyFile(t, filepath.Join(repoDir, "beta.go"), testComment)
 
-	files, err := validator.FindCommittableFiles(t.Context(), repoDir)
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, false)
 	if err != nil {
 		t.Fatalf("FindCommittableFiles failed: %v", err)
 	}
@@ -1290,7 +1292,7 @@ func TestFindCommittableFiles_WithDependency(t *testing.T) {
 	modifyFile(t, filepath.Join(repoDir, "main.go"), testComment)
 	modifyFile(t, filepath.Join(repoDir, "utils.go"), testComment)
 
-	files, err := validator.FindCommittableFiles(t.Context(), repoDir)
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, false)
 	if err != nil {
 		t.Fatalf("FindCommittableFiles failed: %v", err)
 	}
@@ -1307,7 +1309,7 @@ func TestFindCommittableFiles_WithDependency(t *testing.T) {
 	stageFiles(t, repoDir, "utils.go")
 	runGit(t, repoDir, "commit", "-m", "update utils")
 
-	files, err = validator.FindCommittableFiles(t.Context(), repoDir)
+	files, err = validator.FindCommittableSet(t.Context(), repoDir, false)
 	if err != nil {
 		t.Fatalf("FindCommittableFiles failed after committing utils: %v", err)
 	}
@@ -1336,7 +1338,7 @@ func TestFindCommittableFiles_CircularDependency(t *testing.T) {
 	modifyFile(t, filepath.Join(repoDir, "circular_a.go"), testComment)
 	modifyFile(t, filepath.Join(repoDir, "circular_b.go"), testComment)
 
-	files, err := validator.FindCommittableFiles(t.Context(), repoDir)
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, false)
 	if err != nil {
 		t.Fatalf("FindCommittableFiles failed: %v", err)
 	}
@@ -1366,7 +1368,7 @@ func IndependentFunc() string {
 }
 `)
 
-	files, err := validator.FindCommittableFiles(t.Context(), repoDir)
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, false)
 	if err != nil {
 		t.Fatalf("FindCommittableFiles failed: %v", err)
 	}
@@ -1391,7 +1393,7 @@ func TestFindCommittableFiles_NoModifications(t *testing.T) {
 
 	repoDir := setupTestRepo(t)
 
-	files, err := validator.FindCommittableFiles(t.Context(), repoDir)
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, false)
 	if err != nil {
 		t.Fatalf("FindCommittableFiles failed: %v", err)
 	}
@@ -1419,7 +1421,7 @@ func TestFindCommittableFiles_ExcludesStagedFiles(t *testing.T) {
 	// Modify beta.go but don't stage it.
 	modifyFile(t, filepath.Join(repoDir, "beta.go"), testComment)
 
-	files, err := validator.FindCommittableFiles(t.Context(), repoDir)
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, false)
 	if err != nil {
 		t.Fatalf("FindCommittableFiles failed: %v", err)
 	}
@@ -1451,7 +1453,7 @@ func TestFindCommittableFiles_ExcludesPartiallyStaged(t *testing.T) {
 	// Modify main.go again without staging (creates MM state).
 	modifyFile(t, filepath.Join(repoDir, "main.go"), "\n// Unstaged comment\n")
 
-	files, err := validator.FindCommittableFiles(t.Context(), repoDir)
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, false)
 	if err != nil {
 		t.Fatalf("FindCommittableFiles failed: %v", err)
 	}
@@ -1479,7 +1481,7 @@ func TestFindCommittableFiles_ProgressiveCommit(t *testing.T) {
 	modifyFile(t, filepath.Join(repoDir, "gamma.go"), testComment)
 
 	// First call should return alpha.go.
-	files, err := validator.FindCommittableFiles(t.Context(), repoDir)
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, false)
 	if err != nil {
 		t.Fatalf("FindCommittableFiles failed (1st call): %v", err)
 	}
@@ -1493,7 +1495,7 @@ func TestFindCommittableFiles_ProgressiveCommit(t *testing.T) {
 	runGit(t, repoDir, "commit", "-m", "update alpha")
 
 	// Second call should return beta.go.
-	files, err = validator.FindCommittableFiles(t.Context(), repoDir)
+	files, err = validator.FindCommittableSet(t.Context(), repoDir, false)
 	if err != nil {
 		t.Fatalf("FindCommittableFiles failed (2nd call): %v", err)
 	}
@@ -1507,7 +1509,7 @@ func TestFindCommittableFiles_ProgressiveCommit(t *testing.T) {
 	runGit(t, repoDir, "commit", "-m", "update beta")
 
 	// Third call should return gamma.go.
-	files, err = validator.FindCommittableFiles(t.Context(), repoDir)
+	files, err = validator.FindCommittableSet(t.Context(), repoDir, false)
 	if err != nil {
 		t.Fatalf("FindCommittableFiles failed (3rd call): %v", err)
 	}
@@ -1521,12 +1523,180 @@ func TestFindCommittableFiles_ProgressiveCommit(t *testing.T) {
 	runGit(t, repoDir, "commit", "-m", "update gamma")
 
 	// Fourth call should return empty (all committed).
-	files, err = validator.FindCommittableFiles(t.Context(), repoDir)
+	files, err = validator.FindCommittableSet(t.Context(), repoDir, false)
 	if err != nil {
 		t.Fatalf("FindCommittableFiles failed (4th call): %v", err)
 	}
 
 	if len(files) != 0 {
 		t.Errorf("Expected no files after all committed, got %v", files)
+	}
+}
+
+// TestFindCommittableSet_WithDependants_SingleDependant tests the --dependants flag
+// with a base file and one dependant.
+func TestFindCommittableSet_WithDependants_SingleDependant(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"FindCommittableSet - With Dependants - Single Dependant",
+		"types.go (independent) <- service.go (depends on types.go)",
+		"Modified [types.go, service.go] | Unstaged [types.go, service.go]",
+		"Should return [types.go, service.go] when --dependants is used")
+
+	repoDir := setupTestRepo(t)
+
+	// Modify types.go (independent) and service.go (depends on types.go).
+	modifyFile(t, filepath.Join(repoDir, "types.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, "service.go"), testComment)
+
+	// Without dependants flag - should return only types.go.
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, false)
+	if err != nil {
+		t.Fatalf("FindCommittableSet failed: %v", err)
+	}
+
+	if len(files) != 1 || files[0] != "types.go" {
+		t.Fatalf("Without dependants: expected [types.go], got %v", files)
+	}
+
+	// With dependants flag - should return types.go + service.go.
+	files, err = validator.FindCommittableSet(t.Context(), repoDir, true)
+	if err != nil {
+		t.Fatalf("FindCommittableSet with dependants failed: %v", err)
+	}
+
+	if len(files) != 2 {
+		t.Fatalf("With dependants: expected 2 files, got %d: %v", len(files), files)
+	}
+
+	// Result should include both types.go (base) and service.go (dependant).
+	// The base file comes first, then dependants in sorted order.
+	expectedFiles := map[string]bool{"types.go": true, "service.go": true}
+	for _, f := range files {
+		if !expectedFiles[f] {
+			t.Errorf("Unexpected file in result: %s", f)
+		}
+	}
+}
+
+// TestFindCommittableSet_WithDependants_MultipleDependants tests the --dependants flag
+// with a base file and multiple dependants.
+func TestFindCommittableSet_WithDependants_MultipleDependants(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"FindCommittableSet - With Dependants - Multiple Dependants",
+		"utils.go (independent) <- service.go (depends on utils.go) and main.go (depends on utils.go)",
+		"Modified [utils.go, service.go, main.go] | Unstaged [utils.go, service.go, main.go]",
+		"Should return [main.go, service.go, utils.go] when --dependants is used")
+
+	repoDir := setupTestRepo(t)
+
+	// Modify utils.go (independent), service.go (depends on utils.go), and main.go (depends on utils.go).
+	modifyFile(t, filepath.Join(repoDir, "utils.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, "service.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, "main.go"), testComment)
+
+	// With dependants flag - should return utils.go + its dependants.
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, true)
+	if err != nil {
+		t.Fatalf("FindCommittableSet with dependants failed: %v", err)
+	}
+
+	// Should include utils.go, service.go (depends only on utils.go), and main.go (depends on utils.go + service.go).
+	// Note: main.go depends on both utils.go AND service.go, so it should NOT be included.
+	if len(files) < 2 {
+		t.Fatalf("With dependants: expected at least 2 files, got %d: %v", len(files), files)
+	}
+
+	// Verify utils.go is in the result (base file).
+	if !slices.Contains(files, "utils.go") {
+		t.Errorf("With dependants: expected utils.go in results, got %v", files)
+	}
+}
+
+// TestFindCommittableSet_WithDependants_ExcludeTransitiveDependants tests that
+// transitive dependants (dependants of dependants) are excluded.
+func TestFindCommittableSet_WithDependants_ExcludeTransitiveDependants(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"FindCommittableSet - With Dependants - Exclude Transitive",
+		"types.go <- service.go <- main.go (chain)",
+		"Modified [types.go, service.go, main.go] | Unstaged [types.go, service.go, main.go]",
+		"Should return [types.go, service.go] excluding main.go (transitive)")
+
+	repoDir := setupTestRepo(t)
+
+	// Modify types.go, service.go (depends on types.go), and main.go (depends on service.go).
+	modifyFile(t, filepath.Join(repoDir, "types.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, "service.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, "main.go"), testComment)
+
+	// With dependants flag.
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, true)
+	if err != nil {
+		t.Fatalf("FindCommittableSet with dependants failed: %v", err)
+	}
+
+	// Main.go depends on service.go (which is in changeset), so it should be excluded.
+	if slices.Contains(files, "main.go") {
+		t.Errorf("Should NOT include main.go (depends on service.go in changeset), got %v", files)
+	}
+}
+
+// TestFindCommittableSet_WithDependants_CircularDependency tests behavior with circular deps.
+func TestFindCommittableSet_WithDependants_CircularDependency(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"FindCommittableSet - With Dependants - Circular Dependency",
+		"circular_a.go <-> circular_b.go (circular)",
+		"Modified [circular_a.go, circular_b.go] | Unstaged [circular_a.go, circular_b.go]",
+		"Should return empty (no independent file due to circular dependency)")
+
+	repoDir := setupTestRepo(t)
+
+	// Modify both files with circular dependency.
+	modifyFile(t, filepath.Join(repoDir, "circular_a.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, "circular_b.go"), testComment)
+
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, true)
+	if err != nil {
+		t.Fatalf("FindCommittableSet failed: %v", err)
+	}
+
+	if len(files) != 0 {
+		t.Errorf("Expected empty result for circular dependency, got %v", files)
+	}
+}
+
+// TestFindCommittableSet_WithDependants_NoDependants tests a file with no dependants.
+func TestFindCommittableSet_WithDependants_NoDependants(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"FindCommittableSet - With Dependants - No Dependants",
+		"alpha.go (independent, no dependants)",
+		"Modified [alpha.go] | Unstaged [alpha.go]",
+		"Should return [alpha.go] only (no dependants exist)")
+
+	repoDir := setupTestRepo(t)
+
+	// Modify alpha.go (independent, no other files depend on it).
+	modifyFile(t, filepath.Join(repoDir, "alpha.go"), testComment)
+
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, true)
+	if err != nil {
+		t.Fatalf("FindCommittableSet failed: %v", err)
+	}
+
+	if len(files) != 1 {
+		t.Fatalf("Expected 1 file, got %d: %v", len(files), files)
+	}
+
+	if files[0] != "alpha.go" {
+		t.Errorf("Expected alpha.go, got %s", files[0])
 	}
 }
