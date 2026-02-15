@@ -51,6 +51,7 @@ func LoadPackages(dir string, overlay map[string][]byte, patterns ...string) ([]
 
 // CollectSymbols extracts symbol definitions and usages from a package.
 // Returns two maps: defined symbols and used symbols from other packages.
+//
 //nolint:nonamedreturns // Named returns clarify same-type return values.
 func CollectSymbols(pkg *packages.Package) (defined, used map[string]types.Object) {
 	defined = make(map[string]types.Object)
