@@ -89,6 +89,19 @@ func GetStagedContent(ctx context.Context, dir, path string) ([]byte, error) {
 	return output, nil
 }
 
+// GetStagedDiff returns the unified diff of staged changes in the specified directory.
+// This represents what would be committed (git diff --cached).
+func GetStagedDiff(ctx context.Context, dir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "diff", "--cached")
+
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("getting staged diff: %w", err)
+	}
+
+	return string(output), nil
+}
+
 // FilterGoFiles filters a list of files to only include .go files.
 func FilterGoFiles(files []string) []string {
 	var goFiles []string
