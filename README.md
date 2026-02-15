@@ -119,7 +119,7 @@ internal/analyzer/   Go package loading and symbol extraction
 internal/git/        Git command wrappers (staged files, content, status)
 internal/graph/      Symbol dependency graph construction and traversal
 internal/validator/   Validation orchestration and committable file selection
-docs/adr/            Architecture decision records
+docs/decisions/      Architecture decision records
 ```
 
 ## Development
