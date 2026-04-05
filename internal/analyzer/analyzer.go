@@ -35,6 +35,7 @@ func LoadPackages(dir string, overlay map[string][]byte, patterns ...string) ([]
 			packages.NeedDeps,
 		Dir:     dir,
 		Overlay: overlay,
+		Tests:   true,
 	}
 
 	pkgs, err := packages.Load(cfg, patterns...)
