@@ -234,6 +234,124 @@ func TestValidateAtomicCommit_DirectDependency(t *testing.T) {
 	}
 }
 
+func TestValidateAtomicCommit_SignatureDependency(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"Function Signature Dependency Violation",
+		"runner.go (Run) -> interfaces.go (Handler) — dependency via parameter type only",
+		"Untracked [interfaces.go, runner.go] | Staged [runner.go] | Unstaged [interfaces.go]",
+		"Violation detected - staged file depends on untracked file through function signature")
+
+	repoDir := setupTestRepo(t)
+
+	// Create a type definition in an untracked file.
+	createUntrackedFile(t, repoDir, "interfaces.go", `package main
+
+// Handler handles requests.
+type Handler interface {
+	Handle() error
+}
+`)
+
+	// Create a function that uses Handler only in its signature (not in body).
+	createUntrackedFile(t, repoDir, "runner.go", `package main
+
+// Run runs a handler.
+func Run(h Handler) error {
+	return h.Handle()
+}
+`)
+
+	// Stage only the consumer file; the type definition remains untracked.
+	stageFiles(t, repoDir, "runner.go")
+
+	violations, err := validator.ValidateAtomicCommit(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("ValidateAtomicCommit failed: %v", err)
+	}
+
+	if len(violations) == 0 {
+		t.Fatal("Expected violation: staged runner.go depends on untracked interfaces.go, got none")
+	}
+
+	found := false
+
+	for _, v := range violations {
+		if v.StagedFile == "runner.go" && v.MissingFile == "interfaces.go" {
+			found = true
+
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected violation from runner.go to interfaces.go, violations: %+v", violations)
+	}
+}
+
+func TestValidateAtomicCommit_TestFileDependsOnSourceFile(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"Test File Depends on Unstaged Source File",
+		"widget_test.go (TestNewWidget) -> widget.go (NewWidget)",
+		"Untracked [widget.go, widget_test.go] | Staged [widget_test.go] | Unstaged [widget.go]",
+		"Violation detected - staged test file depends on unstaged source file")
+
+	repoDir := setupTestRepo(t)
+
+	// Create a new source file with an exported function.
+	createUntrackedFile(t, repoDir, "widget.go", `package main
+
+// NewWidget creates a new widget.
+func NewWidget() string {
+	return "widget"
+}
+`)
+
+	// Create a test file in the same package that uses NewWidget.
+	createUntrackedFile(t, repoDir, "widget_test.go", `package main
+
+import "testing"
+
+func TestNewWidget(t *testing.T) {
+	t.Parallel()
+
+	got := NewWidget()
+	if got == "" {
+		t.Error("NewWidget returned empty string")
+	}
+}
+`)
+
+	// Stage only the test file, leaving widget.go untracked.
+	stageFiles(t, repoDir, "widget_test.go")
+
+	violations, err := validator.ValidateAtomicCommit(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("ValidateAtomicCommit failed: %v", err)
+	}
+
+	if len(violations) == 0 {
+		t.Fatal("Expected violation: staged widget_test.go depends on untracked widget.go, got none")
+	}
+
+	found := false
+
+	for _, v := range violations {
+		if v.StagedFile == "widget_test.go" && v.MissingFile == "widget.go" {
+			found = true
+
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected violation from widget_test.go to widget.go, violations: %+v", violations)
+	}
+}
+
 // transitiveViolationTest is a helper to avoid code duplication between
 // TestValidateAtomicCommit_TransitiveDependency and
 // TestValidateAtomicCommit_SpecificSymbol_TransitiveChain.

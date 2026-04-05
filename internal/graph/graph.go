@@ -122,8 +122,11 @@ func (g *DependencyGraph) registerDefinitions(pkg *packages.Package) {
 			File:    pkg.Fset.Position(obj.Pos()).Filename,
 			Pos:     pkg.Fset.Position(obj.Pos()),
 		}
+		if _, exists := g.Symbols[sym.ID]; !exists {
+			g.FileSyms[sym.File] = append(g.FileSyms[sym.File], sym.ID)
+		}
+
 		g.Symbols[sym.ID] = sym
-		g.FileSyms[sym.File] = append(g.FileSyms[sym.File], sym.ID)
 	}
 }
 
@@ -150,6 +153,13 @@ func (g *DependencyGraph) trackUsages(pkg *packages.Package) {
 func (g *DependencyGraph) trackFuncBodyUsages(
 	pkg *packages.Package, callerID string, fn *ast.FuncDecl,
 ) {
+	// Track usages in function signature (parameter and return types).
+	ast.Inspect(fn.Type, func(inner ast.Node) bool {
+		g.recordUsage(pkg, callerID, inner)
+
+		return true
+	})
+
 	if fn.Body == nil {
 		return
 	}
