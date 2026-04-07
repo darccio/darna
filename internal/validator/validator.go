@@ -3,9 +3,12 @@ package validator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/tools/go/packages"
 
 	"dario.cat/darna/internal/analyzer"
 	"dario.cat/darna/internal/git"
@@ -51,7 +54,17 @@ func ValidateAtomicCommit(ctx context.Context, workDir string) ([]Violation, err
 	// 2. Load all packages in the repo.
 	pkgs, err := analyzer.LoadPackages(absWorkDir, overlay, "./...")
 	if err != nil {
-		return nil, fmt.Errorf("loading packages: %w", err)
+		if !errors.Is(err, analyzer.ErrPackagesContainErrors) {
+			return nil, fmt.Errorf("loading packages: %w", err)
+		}
+
+		// Package errors exist. Only fail if any error is in a staged file —
+		// errors confined to unstaged or untracked files can be ignored.
+		if hasErrorsInStagedFiles(pkgs, stagedSet) {
+			analyzer.PrintErrors(pkgs)
+
+			return nil, fmt.Errorf("loading packages: %w", err)
+		}
 	}
 
 	// 3. Build dependency graph.
@@ -96,7 +109,7 @@ func buildOverlay(ctx context.Context, absWorkDir string, statuses map[string]gi
 	overlay := make(map[string][]byte)
 
 	for file, status := range statuses {
-		if status.Staging == ' ' || status.Staging == '?' || status.Worktree == ' ' {
+		if !strings.HasSuffix(file, ".go") {
 			continue
 		}
 
@@ -105,19 +118,52 @@ func buildOverlay(ctx context.Context, absWorkDir string, statuses map[string]gi
 			continue
 		}
 
-		if !strings.HasSuffix(absPath, ".go") {
+		// Overlay files with working-tree changes (both " M" and "MM") with
+		// their staged/index content so the loader sees only what will be
+		// committed, not unrelated in-progress work.
+		if status.Worktree == ' ' || status.Staging == '?' {
 			continue
 		}
 
 		content, err := git.GetStagedContent(ctx, absWorkDir, file)
 		if err != nil {
-			continue // Fall back to working tree (current behavior).
+			continue // Fall back to working tree.
 		}
 
 		overlay[absPath] = content
 	}
 
 	return overlay
+}
+
+// hasErrorsInStagedFiles reports whether any package error originates from a staged file.
+// Errors confined to unstaged or untracked files can be safely ignored.
+func hasErrorsInStagedFiles(pkgs []*packages.Package, stagedSet map[string]bool) bool {
+	for _, pkg := range pkgs {
+		for _, e := range pkg.Errors {
+			file := fileFromErrorPos(e.Pos)
+			if file != "" && stagedSet[file] {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// fileFromErrorPos extracts the file path from a packages.Error.Pos string.
+// The format is "file:line" or "file:line:col" or "" or "-".
+func fileFromErrorPos(pos string) string {
+	if pos == "" || pos == "-" {
+		return ""
+	}
+
+	idx := strings.Index(pos, ":")
+	if idx <= 0 {
+		return ""
+	}
+
+	return pos[:idx]
 }
 
 func findViolations(
@@ -229,9 +275,11 @@ func FindCommittableSet(ctx context.Context, workDir string, includeDependants b
 
 	// 4. Load all packages in the repo.
 	pkgs, err := analyzer.LoadPackages(absWorkDir, overlay, "./...")
-	if err != nil {
+	if err != nil && !errors.Is(err, analyzer.ErrPackagesContainErrors) {
 		return nil, fmt.Errorf("loading packages: %w", err)
 	}
+	// Package errors in unstaged files are tolerated: analysis continues with
+	// the packages that compiled successfully.
 
 	// 5. Build dependency graph.
 	dg := graph.NewDependencyGraph()

@@ -12,7 +12,8 @@ import (
 // GetStagedFiles returns the list of staged files in the specified directory.
 // Only includes files that are added, copied, modified, or renamed (not deleted).
 func GetStagedFiles(ctx context.Context, dir string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "diff", "--cached", "--name-only", "--diff-filter=ACMR")
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, //nolint:gosec // dir comes from caller-controlled config.
+		"diff", "--cached", "--name-only", "--diff-filter=ACMR")
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -29,7 +30,8 @@ func GetStagedFiles(ctx context.Context, dir string) ([]string, error) {
 
 // GetUnstagedModified returns the list of files with unstaged modifications in the specified directory.
 func GetUnstagedModified(ctx context.Context, dir string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "diff", "--name-only")
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, //nolint:gosec // dir comes from caller-controlled config.
+		"diff", "--name-only")
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -53,7 +55,8 @@ type FileStatus struct {
 // GetAllFileStatus returns the status of all files in the specified directory using git status --porcelain.
 // The status uses two-character codes: first is staging area, second is working tree.
 func GetAllFileStatus(ctx context.Context, dir string) (map[string]FileStatus, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "status", "--porcelain", "-z", "--untracked-files=all")
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, //nolint:gosec // dir comes from caller-controlled config.
+		"status", "--porcelain", "-z", "--untracked-files=all")
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -92,7 +95,8 @@ func GetStagedContent(ctx context.Context, dir, path string) ([]byte, error) {
 // GetStagedDiff returns the unified diff of staged changes in the specified directory.
 // This represents what would be committed (git diff --cached).
 func GetStagedDiff(ctx context.Context, dir string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "diff", "--cached")
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, //nolint:gosec // dir comes from caller-controlled config.
+		"diff", "--cached")
 
 	output, err := cmd.Output()
 	if err != nil {
