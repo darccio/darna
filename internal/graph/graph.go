@@ -53,7 +53,12 @@ func (g *DependencyGraph) AddDependency(from, to string) {
 }
 
 // AnalyzePackage analyzes a package and adds its symbols and dependencies to the graph.
+// Packages with nil TypesInfo (e.g. those with parse/type errors) are skipped.
 func (g *DependencyGraph) AnalyzePackage(pkg *packages.Package) {
+	if pkg.TypesInfo == nil {
+		return
+	}
+
 	g.registerDefinitions(pkg)
 	g.trackUsages(pkg)
 }

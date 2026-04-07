@@ -43,11 +43,28 @@ func LoadPackages(dir string, overlay map[string][]byte, patterns ...string) ([]
 		return nil, fmt.Errorf("loading packages: %w", err)
 	}
 
-	if packages.PrintErrors(pkgs) > 0 {
-		return nil, ErrPackagesContainErrors
+	if countErrors(pkgs) > 0 {
+		return pkgs, ErrPackagesContainErrors
 	}
 
 	return pkgs, nil
+}
+
+// PrintErrors prints all errors from the given packages to stderr.
+// Call this only when the caller has decided errors must be surfaced.
+func PrintErrors(pkgs []*packages.Package) {
+	packages.PrintErrors(pkgs)
+}
+
+// countErrors returns the number of errors across all packages without printing.
+func countErrors(pkgs []*packages.Package) int {
+	var n int
+
+	for _, pkg := range pkgs {
+		n += len(pkg.Errors)
+	}
+
+	return n
 }
 
 // CollectSymbols extracts symbol definitions and usages from a package.

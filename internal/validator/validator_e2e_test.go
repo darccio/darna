@@ -84,7 +84,7 @@ func setupTestRepo(t *testing.T) string {
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
-	cmd := exec.CommandContext(t.Context(), "git", args...)
+	cmd := exec.CommandContext(t.Context(), "git", args...) //nolint:gosec // Test helper for git commands.
 	cmd.Dir = dir
 
 	output, err := cmd.CombinedOutput()
@@ -102,7 +102,7 @@ func copyFile(t *testing.T, src, dst string) {
 		t.Fatalf("Failed to read %s: %v", src, err)
 	}
 
-	err = os.WriteFile(dst, data, 0o600)
+	err = os.WriteFile(dst, data, 0o600) //nolint:gosec // Test helper writes to temp dir.
 	if err != nil {
 		t.Fatalf("Failed to write %s: %v", dst, err)
 	}
@@ -1185,7 +1185,7 @@ func TestValidateAtomicCommit_Subpackage_MultipleMainToSubpackages(t *testing.T)
 func writeFileContent(t *testing.T, path, content string) {
 	t.Helper()
 
-	err := os.WriteFile(path, []byte(content), 0o600)
+	err := os.WriteFile(path, []byte(content), 0o600) //nolint:gosec // Test helper writes to temp dir.
 	if err != nil {
 		t.Fatalf("Failed to write %s: %v", path, err)
 	}
@@ -1816,5 +1816,69 @@ func TestFindCommittableSet_WithDependants_NoDependants(t *testing.T) {
 
 	if files[0] != "alpha.go" {
 		t.Errorf("Expected alpha.go, got %s", files[0])
+	}
+}
+
+// TestValidateAtomicCommit_UntrackedFileDoesNotBreakAnalysis verifies that
+// untracked files referencing symbols absent from the staged codebase do not
+// cause compilation errors during analysis.
+func TestValidateAtomicCommit_UntrackedFileDoesNotBreakAnalysis(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"Untracked File With Forward Reference",
+		"utils.go (staged+worktree, MM) | untracked_consumer.go (??, references WorkingTreeFunc)",
+		"Staged [utils.go comment] | WorkingTree [utils.go+WorkingTreeFunc] | Untracked [untracked_consumer.go]",
+		"No compilation error - untracked file is excluded from analysis")
+
+	repoDir := setupTestRepo(t)
+
+	// Stage utils.go with a comment.
+	modifyFile(t, filepath.Join(repoDir, fileUtilsGo), testComment)
+	stageFiles(t, repoDir, fileUtilsGo)
+
+	// Add WorkingTreeFunc to utils.go working tree only (not staged, MM status).
+	wtFunc := "\n// WorkingTreeFunc is only in the working tree.\n" +
+		"func WorkingTreeFunc() string { return \"wt\" }\n"
+	modifyFile(t, filepath.Join(repoDir, fileUtilsGo), wtFunc)
+
+	// Create an untracked file that calls WorkingTreeFunc (only in working tree of utils.go).
+	untrackedContent := "package main\n\n" +
+		"// UntrackedConsumer calls a working-tree-only function.\n" +
+		"func UntrackedConsumer() string { return WorkingTreeFunc() }\n"
+	createUntrackedFile(t, repoDir, "untracked_consumer.go", untrackedContent)
+
+	// Should not return a compilation error - untracked file is neutralised.
+	_, err := validator.ValidateAtomicCommit(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("ValidateAtomicCommit failed (expected no error): %v", err)
+	}
+}
+
+// TestValidateAtomicCommit_WorktreeOnlyFileDoesNotBreakAnalysis verifies that
+// files with working-tree-only changes that introduce invalid references do not
+// cause compilation errors during analysis.
+func TestValidateAtomicCommit_WorktreeOnlyFileDoesNotBreakAnalysis(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"Working-Tree-Only File With Undefined Reference",
+		"utils.go ( M, worktree-only adds call to undefined func) | main.go staged",
+		"Staged [main.go comment] | WorkingTree [utils.go+undefined call]",
+		"No compilation error - working-tree content replaced with index version")
+
+	repoDir := setupTestRepo(t)
+
+	// Stage main.go with a comment.
+	modifyFile(t, filepath.Join(repoDir, fileMainGo), testComment)
+	stageFiles(t, repoDir, fileMainGo)
+
+	// Add an invalid call to utils.go working tree only (not staged,  M status).
+	modifyFile(t, filepath.Join(repoDir, fileUtilsGo), "\nfunc init() { _ = undefinedFuncThatDoesNotExist() }\n")
+
+	// Should not return a compilation error - working tree content is replaced with index version.
+	_, err := validator.ValidateAtomicCommit(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("ValidateAtomicCommit failed (expected no error): %v", err)
 	}
 }
