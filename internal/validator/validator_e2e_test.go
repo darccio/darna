@@ -150,6 +150,21 @@ func createUntrackedFile(t *testing.T, repoDir, filename, content string) {
 	}
 }
 
+// createUntrackedSubpackage creates a new untracked subpackage directory in the repo.
+// Returns the absolute path to the created directory.
+func createUntrackedSubpackage(t *testing.T, repoDir, subpkg string) string {
+	t.Helper()
+
+	dir := filepath.Join(repoDir, subpkg)
+
+	err := os.MkdirAll(dir, 0o750)
+	if err != nil {
+		t.Fatalf("Failed to create %s dir: %v", subpkg, err)
+	}
+
+	return dir
+}
+
 // logTestPattern logs a structured description of the test pattern.
 func logTestPattern(t *testing.T, pattern, graphDesc, setup, expect string) {
 	t.Helper()
@@ -1852,6 +1867,117 @@ func TestValidateAtomicCommit_UntrackedFileDoesNotBreakAnalysis(t *testing.T) {
 	_, err := validator.ValidateAtomicCommit(t.Context(), repoDir)
 	if err != nil {
 		t.Fatalf("ValidateAtomicCommit failed (expected no error): %v", err)
+	}
+}
+
+// TestValidateAtomicCommit_StructFieldTypeDependency verifies that a struct type
+// whose field type references an untracked subpackage is flagged as a violation.
+// This tests that type-level (non-function) symbol usages are tracked correctly.
+func TestValidateAtomicCommit_StructFieldTypeDependency(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"Struct Field Type Dependency (type-level reference)",
+		"repo.go (staged, defines Repo struct with NewStore field typed as store.Writer) | store/writer.go (untracked)",
+		"Staged [repo.go] | Untracked [store/writer.go defines store.Writer interface]",
+		"Violation detected - Repo struct field type depends on untracked store.Writer")
+
+	repoDir := setupTestRepo(t)
+	storeDir := createUntrackedSubpackage(t, repoDir, "store")
+
+	writeFileContent(t, filepath.Join(storeDir, "writer.go"),
+		"package store\n\n// Writer is a write interface.\ntype Writer interface { Write(p []byte) (int, error) }\n")
+
+	// Create a staged file whose struct field type references store.Writer.
+	writeFileContent(t, filepath.Join(repoDir, "repo.go"),
+		"package main\n\nimport \"example.com/testproject/store\"\n\n"+
+			"// Repo holds repo operations.\ntype Repo struct {\n"+
+			"\tNewWriter func() store.Writer\n}\n")
+	stageFiles(t, repoDir, "repo.go")
+
+	violations, err := validator.ValidateAtomicCommit(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("ValidateAtomicCommit failed: %v", err)
+	}
+
+	if len(violations) == 0 {
+		t.Fatal("Expected violation for struct field type dependency on untracked store.Writer, got none")
+	}
+
+	found := false
+
+	for _, v := range violations {
+		if v.StagedFile == "repo.go" && v.MissingFile == "store/writer.go" {
+			found = true
+
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected violation from repo.go to store/writer.go, violations: %+v", violations)
+	}
+}
+
+// TestValidateAtomicCommit_VarTypeDependency verifies that a package-level var
+// whose type or initializer references an untracked subpackage is flagged.
+func TestValidateAtomicCommit_VarTypeDependency(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"Var Type + Initializer Dependency",
+		"vars.go (staged, defines var with store.Writer type and store.New initializer) | store/writer.go (untracked)",
+		"Staged [vars.go] | Untracked [store/writer.go defines store.Writer and store.New]",
+		"Violation detected - var type and initializer depend on untracked store package")
+
+	repoDir := setupTestRepo(t)
+	storeDir := createUntrackedSubpackage(t, repoDir, "store")
+
+	writeFileContent(t, filepath.Join(storeDir, "writer.go"),
+		"package store\n\n"+
+			"// Writer is a write interface.\n"+
+			"type Writer interface { Write(p []byte) (int, error) }\n\n"+
+			"// New creates a new Writer.\n"+
+			"func New() Writer { return nil }\n")
+
+	// Create a staged file with a var that depends on store.Writer (type) and store.New (initializer).
+	writeFileContent(t, filepath.Join(repoDir, "vars.go"),
+		"package main\n\nimport \"example.com/testproject/store\"\n\n"+
+			"// DefaultWriter is the default writer.\n"+
+			"var DefaultWriter store.Writer = store.New()\n")
+	stageFiles(t, repoDir, "vars.go")
+
+	violations, err := validator.ValidateAtomicCommit(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("ValidateAtomicCommit failed: %v", err)
+	}
+
+	if len(violations) == 0 {
+		t.Fatal("Expected violation for var type dependency on untracked store package, got none")
+	}
+
+	// Check both the type annotation (store.Writer) and initializer (store.New) are caught.
+	foundType := false
+	foundInit := false
+
+	for _, v := range violations {
+		if v.StagedFile == "vars.go" && v.MissingFile == "store/writer.go" {
+			if v.MissingSymbol == "example.com/testproject/store.Writer" {
+				foundType = true
+			}
+
+			if v.MissingSymbol == "example.com/testproject/store.New" {
+				foundInit = true
+			}
+		}
+	}
+
+	if !foundType {
+		t.Errorf("Expected violation for store.Writer type annotation, violations: %+v", violations)
+	}
+
+	if !foundInit {
+		t.Errorf("Expected violation for store.New initializer, violations: %+v", violations)
 	}
 }
 
