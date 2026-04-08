@@ -138,21 +138,82 @@ func (g *DependencyGraph) registerDefinitions(pkg *packages.Package) {
 func (g *DependencyGraph) trackUsages(pkg *packages.Package) {
 	for _, file := range pkg.Syntax {
 		ast.Inspect(file, func(n ast.Node) bool {
-			fn, ok := n.(*ast.FuncDecl)
-			if !ok {
-				return true
+			switch decl := n.(type) {
+			case *ast.FuncDecl:
+				callerID := callerSymbolID(pkg, decl)
+				if callerID != "" {
+					g.trackFuncBodyUsages(pkg, callerID, decl)
+				}
+			case *ast.TypeSpec:
+				g.trackTypeSpecUsages(pkg, decl)
+			case *ast.ValueSpec:
+				g.trackValueSpecUsages(pkg, decl)
 			}
-
-			callerID := callerSymbolID(pkg, fn)
-			if callerID == "" {
-				return true
-			}
-
-			g.trackFuncBodyUsages(pkg, callerID, fn)
 
 			return true
 		})
 	}
+}
+
+func (g *DependencyGraph) trackTypeSpecUsages(pkg *packages.Package, ts *ast.TypeSpec) {
+	obj := pkg.TypesInfo.Defs[ts.Name]
+	if obj == nil {
+		return
+	}
+
+	callerID := symbolID(obj)
+	if callerID == "" {
+		return
+	}
+
+	ast.Inspect(ts.Type, func(inner ast.Node) bool {
+		g.recordUsage(pkg, callerID, inner)
+
+		return true
+	})
+}
+
+func (g *DependencyGraph) trackValueSpecUsages(pkg *packages.Package, vs *ast.ValueSpec) {
+	callerIDs := collectValueSpecCallerIDs(pkg, vs)
+	if len(callerIDs) == 0 {
+		return
+	}
+
+	inspect := func(node ast.Node) {
+		ast.Inspect(node, func(inner ast.Node) bool {
+			for _, callerID := range callerIDs {
+				g.recordUsage(pkg, callerID, inner)
+			}
+
+			return true
+		})
+	}
+
+	if vs.Type != nil {
+		inspect(vs.Type)
+	}
+
+	for _, val := range vs.Values {
+		inspect(val)
+	}
+}
+
+func collectValueSpecCallerIDs(pkg *packages.Package, vs *ast.ValueSpec) []string {
+	var ids []string
+
+	for _, name := range vs.Names {
+		obj := pkg.TypesInfo.Defs[name]
+		if obj == nil || obj.Parent() != pkg.Types.Scope() {
+			continue
+		}
+
+		callerID := symbolID(obj)
+		if callerID != "" {
+			ids = append(ids, callerID)
+		}
+	}
+
+	return ids
 }
 
 func (g *DependencyGraph) trackFuncBodyUsages(
