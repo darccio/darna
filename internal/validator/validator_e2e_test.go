@@ -1981,6 +1981,288 @@ func TestValidateAtomicCommit_VarTypeDependency(t *testing.T) {
 	}
 }
 
+// ===========================.
+// DetectChangesets Tests.
+// ===========================.
+
+// assertChangesets compares two changeset lists ignoring the top-level order
+// of groups. Files within each group are already sorted lexicographically by
+// DetectChangesets, so equal groups compare directly.
+func assertChangesets(t *testing.T, got, want [][]string) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("Expected %d changesets, got %d: %v", len(want), len(got), got)
+	}
+
+	gotSorted := sortGroups(got)
+	wantSorted := sortGroups(want)
+
+	if !slices.EqualFunc(gotSorted, wantSorted, slices.Equal[[]string]) {
+		t.Errorf("Changesets mismatch:\n got:  %v\n want: %v", gotSorted, wantSorted)
+	}
+}
+
+// sortGroups returns a copy of groups sorted by the first element of each
+// group so test assertions are independent of BFS iteration order.
+func sortGroups(groups [][]string) [][]string {
+	out := make([][]string, len(groups))
+	for i, g := range groups {
+		cp := make([]string, len(g))
+		copy(cp, g)
+		slices.Sort(cp)
+		out[i] = cp
+	}
+
+	slices.SortFunc(out, func(a, b []string) int {
+		return strings.Compare(a[0], b[0])
+	})
+
+	return out
+}
+
+func TestDetectChangesets_SingleFile_OneGroup(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"DetectChangesets - Single Staged File",
+		"main.go alone (its committed deps do not create staged-set edges)",
+		"Modified [main.go] | Staged [main.go]",
+		"1 changeset containing main.go")
+
+	repoDir := setupTestRepo(t)
+
+	modifyFile(t, filepath.Join(repoDir, fileMainGo), testComment)
+	stageFiles(t, repoDir, fileMainGo)
+
+	got, err := validator.DetectChangesets(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("DetectChangesets failed: %v", err)
+	}
+
+	assertChangesets(t, got, [][]string{{fileMainGo}})
+}
+
+func TestDetectChangesets_ConnectedChain_OneGroup(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"DetectChangesets - Connected Dependency Chain",
+		"main.go -> service.go -> utils.go/types.go (all staged)",
+		"Modified [main.go, service.go, utils.go, types.go] | Staged [all]",
+		"1 changeset containing all four files")
+
+	repoDir := setupTestRepo(t)
+
+	modifyFile(t, filepath.Join(repoDir, fileMainGo), testComment)
+	modifyFile(t, filepath.Join(repoDir, "service.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, fileUtilsGo), testComment)
+	modifyFile(t, filepath.Join(repoDir, fileTypesGo), testComment)
+	stageFiles(t, repoDir, fileMainGo, "service.go", fileUtilsGo, fileTypesGo)
+
+	got, err := validator.DetectChangesets(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("DetectChangesets failed: %v", err)
+	}
+
+	assertChangesets(t, got, [][]string{{fileMainGo, "service.go", fileTypesGo, fileUtilsGo}})
+}
+
+func TestDetectChangesets_TwoIndependentGroups(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"DetectChangesets - Two Independent Groups",
+		"{alpha.go, beta.go} (beta -> alpha) and {service.go, types.go} (service -> types)",
+		"Modified [alpha.go, beta.go, service.go, types.go] | Staged [all]",
+		"2 changesets: {alpha, beta} and {service, types}")
+
+	repoDir := setupTestRepo(t)
+
+	modifyFile(t, filepath.Join(repoDir, "alpha.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, "beta.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, "service.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, fileTypesGo), testComment)
+	stageFiles(t, repoDir, "alpha.go", "beta.go", "service.go", fileTypesGo)
+
+	got, err := validator.DetectChangesets(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("DetectChangesets failed: %v", err)
+	}
+
+	assertChangesets(t, got, [][]string{
+		{"alpha.go", "beta.go"},
+		{"service.go", fileTypesGo},
+	})
+}
+
+func TestDetectChangesets_ThreeIsolatedFiles(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"DetectChangesets - Three Isolated Files",
+		"alpha.go, main.go, consumer.go (each depends only on committed code)",
+		"Modified [alpha.go, main.go, consumer.go] | Staged [all]",
+		"3 changesets: one per staged file")
+
+	repoDir := setupTestRepo(t)
+
+	modifyFile(t, filepath.Join(repoDir, "alpha.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, fileMainGo), testComment)
+	modifyFile(t, filepath.Join(repoDir, fileConsumerGo), testComment)
+	stageFiles(t, repoDir, "alpha.go", fileMainGo, fileConsumerGo)
+
+	got, err := validator.DetectChangesets(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("DetectChangesets failed: %v", err)
+	}
+
+	assertChangesets(t, got, [][]string{
+		{"alpha.go"},
+		{fileConsumerGo},
+		{fileMainGo},
+	})
+}
+
+func TestDetectChangesets_TestFileGroupedWithSource(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"DetectChangesets - Test File Grouped With Source",
+		"widget_test.go (TestNewWidget) -> widget.go (NewWidget)",
+		"Untracked [widget.go, widget_test.go] | Staged [both]",
+		"1 changeset containing both files")
+
+	repoDir := setupTestRepo(t)
+
+	createUntrackedFile(t, repoDir, "widget.go", `package main
+
+// NewWidget creates a new widget.
+func NewWidget() string {
+	return "widget"
+}
+`)
+
+	createUntrackedFile(t, repoDir, "widget_test.go", `package main
+
+import "testing"
+
+func TestNewWidget(t *testing.T) {
+	t.Parallel()
+
+	if NewWidget() == "" {
+		t.Error("empty widget")
+	}
+}
+`)
+
+	stageFiles(t, repoDir, "widget.go", "widget_test.go")
+
+	got, err := validator.DetectChangesets(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("DetectChangesets failed: %v", err)
+	}
+
+	assertChangesets(t, got, [][]string{{"widget.go", "widget_test.go"}})
+}
+
+func TestDetectChangesets_CircularDependency_OneGroup(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"DetectChangesets - Circular Dependency",
+		"circular_a.go (FuncA) <-> circular_b.go (FuncB)",
+		"Modified [circular_a.go, circular_b.go] | Staged [both]",
+		"1 changeset containing both files")
+
+	repoDir := setupTestRepo(t)
+
+	modifyFile(t, filepath.Join(repoDir, "circular_a.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, "circular_b.go"), testComment)
+	stageFiles(t, repoDir, "circular_a.go", "circular_b.go")
+
+	got, err := validator.DetectChangesets(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("DetectChangesets failed: %v", err)
+	}
+
+	assertChangesets(t, got, [][]string{{"circular_a.go", "circular_b.go"}})
+}
+
+func TestDetectChangesets_CrossPackageChain_OneGroup(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"DetectChangesets - Cross-Package Chain",
+		"processor.go -> models/response.go -> helper/formatter.go",
+		"Modified [processor.go, models/response.go, helper/formatter.go] | Staged [all]",
+		"1 changeset containing all three files")
+
+	repoDir := setupTestRepo(t)
+
+	modifyFile(t, filepath.Join(repoDir, fileProcessorGo), testComment)
+	modifyFile(t, filepath.Join(repoDir, "models", "response.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, "helper", "formatter.go"), testComment)
+	stageFiles(t, repoDir, fileProcessorGo, "models/response.go", "helper/formatter.go")
+
+	got, err := validator.DetectChangesets(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("DetectChangesets failed: %v", err)
+	}
+
+	assertChangesets(t, got, [][]string{{fileHelperFmtGo, fileModelsResponse, fileProcessorGo}})
+}
+
+func TestDetectChangesets_MixedConnectedAndIsolated(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"DetectChangesets - Mixed Connected And Isolated",
+		"{service.go, types.go} connected + alpha.go isolated",
+		"Modified [service.go, types.go, alpha.go] | Staged [all]",
+		"2 changesets: {service, types} and {alpha}")
+
+	repoDir := setupTestRepo(t)
+
+	modifyFile(t, filepath.Join(repoDir, "service.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, fileTypesGo), testComment)
+	modifyFile(t, filepath.Join(repoDir, "alpha.go"), testComment)
+	stageFiles(t, repoDir, "service.go", fileTypesGo, "alpha.go")
+
+	got, err := validator.DetectChangesets(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("DetectChangesets failed: %v", err)
+	}
+
+	assertChangesets(t, got, [][]string{
+		{"alpha.go"},
+		{"service.go", fileTypesGo},
+	})
+}
+
+func TestDetectChangesets_NoStagedFiles(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"DetectChangesets - No Staged Files",
+		"main.go modified but not staged",
+		"Modified [main.go] | Staged [NONE]",
+		"nil result")
+
+	repoDir := setupTestRepo(t)
+
+	modifyFile(t, filepath.Join(repoDir, fileMainGo), testComment)
+
+	got, err := validator.DetectChangesets(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("DetectChangesets failed: %v", err)
+	}
+
+	if got != nil {
+		t.Errorf("Expected nil for no staged files, got %v", got)
+	}
+}
+
 // TestValidateAtomicCommit_WorktreeOnlyFileDoesNotBreakAnalysis verifies that
 // files with working-tree-only changes that introduce invalid references do not
 // cause compilation errors during analysis.

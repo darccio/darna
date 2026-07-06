@@ -24,6 +24,7 @@ func main() {
 	dependants := flag.Bool("dependants", false, "include direct dependants when using --committable")
 	commitMsg := flag.String("commit-msg", "", "generate commit message using agent (claude, codex, mistral, opencode)")
 	promptFile := flag.String("prompt-file", "", "custom prompt file for --commit-msg")
+	singleChangeset := flag.Bool("single-changeset", false, "fail if staged files contain multiple independent changesets")
 
 	flag.Parse()
 
@@ -73,11 +74,36 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *singleChangeset && !runSingleChangesetCheck(ctx, *workDir) {
+		os.Exit(1)
+	}
+
 	if *verbose {
 		writeString(os.Stdout, "Commit is atomic\n")
 	}
 
 	os.Exit(0)
+}
+
+// runSingleChangesetCheck runs the changeset detection pass and returns true
+// when the staged files form zero or one changeset. Returns false (with a
+// message printed to stderr on error, or the changeset list to stdout on
+// split) so the caller can exit non-zero.
+func runSingleChangesetCheck(ctx context.Context, workDir string) bool {
+	changesets, err := validator.DetectChangesets(ctx, workDir)
+	if err != nil {
+		writeString(os.Stderr, "Error: "+err.Error()+"\n")
+
+		return false
+	}
+
+	if len(changesets) > 1 {
+		printChangesets(os.Stdout, changesets)
+
+		return false
+	}
+
+	return true
 }
 
 var errNoStagedChanges = errors.New("no staged changes (stage files with git add first)")
@@ -161,4 +187,29 @@ func groupByMissingFile(violations []validator.Violation) map[string][]validator
 	}
 
 	return byFile
+}
+
+func printChangesets(w io.Writer, changesets [][]string) {
+	writeString(w, fmt.Sprintf(
+		"Commit is atomic but contains %d independent changesets. Split into separate commits:\n\n",
+		len(changesets),
+	))
+
+	for i, group := range changesets {
+		writeString(w, fmt.Sprintf("  Changeset %d:\n", i+1))
+
+		for _, file := range group {
+			writeString(w, "    "+file+"\n")
+		}
+
+		writeString(w, "\n")
+	}
+
+	writeString(w, "To fix, run:\n")
+	writeString(w, "   git reset\n")
+
+	for _, group := range changesets {
+		writeString(w, "   git add "+strings.Join(group, " ")+"\n")
+		writeString(w, "   git commit -m \"...\"\n")
+	}
 }

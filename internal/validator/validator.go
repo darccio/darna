@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
@@ -571,6 +572,184 @@ func filterCommittableWithBase(
 			result = append(result, file)
 		}
 	}
+
+	return result
+}
+
+// DetectChangesets partitions staged .go files into independent changesets.
+// A changeset is a maximal set of staged files connected by direct symbol
+// dependencies in either direction. Returns one slice of relative file paths
+// per changeset, sorted lexicographically within each changeset and by first
+// element across changesets. Returns nil when nothing is staged.
+func DetectChangesets(ctx context.Context, workDir string) ([][]string, error) {
+	absWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolving work dir: %w", err)
+	}
+
+	statuses, err := git.GetAllFileStatus(ctx, absWorkDir)
+	if err != nil {
+		return nil, fmt.Errorf("getting file status: %w", err)
+	}
+
+	staged, stagedSet, _ := categorizeFiles(absWorkDir, statuses)
+
+	stagedGo := git.FilterGoFiles(staged)
+	if len(stagedGo) == 0 {
+		return nil, nil
+	}
+
+	overlay := buildOverlay(ctx, absWorkDir, statuses)
+
+	pkgs, err := analyzer.LoadPackages(absWorkDir, overlay, "./...")
+	if err != nil {
+		if !errors.Is(err, analyzer.ErrPackagesContainErrors) {
+			return nil, fmt.Errorf("loading packages: %w", err)
+		}
+
+		if hasErrorsInStagedFiles(pkgs, stagedSet) {
+			analyzer.PrintErrors(pkgs)
+
+			return nil, fmt.Errorf("loading packages: %w", err)
+		}
+	}
+
+	dg := graph.NewDependencyGraph()
+	for _, pkg := range pkgs {
+		dg.AnalyzePackage(pkg)
+	}
+
+	return findChangesets(dg, stagedGo, stagedSet, absWorkDir), nil
+}
+
+// findChangesets groups staged files into connected components by direct
+// symbol dependencies between staged files, then returns each component as
+// a sorted slice of relative paths.
+func findChangesets(
+	dg *graph.DependencyGraph,
+	stagedGo []string,
+	stagedSet map[string]bool,
+	absWorkDir string,
+) [][]string {
+	adj := buildStagedFileAdjacency(dg, stagedGo, stagedSet)
+	components := connectedComponents(stagedGo, adj)
+
+	return sortChangesets(components, absWorkDir)
+}
+
+// buildStagedFileAdjacency builds an undirected adjacency map between staged
+// files. Every staged file is present as a node, even if isolated. An edge
+// A—B exists if any symbol in A directly depends on a symbol whose file is B
+// (and B != A).
+func buildStagedFileAdjacency(
+	dg *graph.DependencyGraph,
+	stagedGo []string,
+	stagedSet map[string]bool,
+) map[string]map[string]struct{} {
+	adj := make(map[string]map[string]struct{}, len(stagedGo))
+	for _, file := range stagedGo {
+		adj[file] = make(map[string]struct{})
+	}
+
+	for _, file := range stagedGo {
+		addFileEdges(dg, file, stagedSet, adj)
+	}
+
+	return adj
+}
+
+// addFileEdges records undirected edges between file and every other staged
+// file that any symbol defined in file directly depends on.
+func addFileEdges(
+	dg *graph.DependencyGraph,
+	file string,
+	stagedSet map[string]bool,
+	adj map[string]map[string]struct{},
+) {
+	for _, symID := range dg.FileSyms[file] {
+		for depID := range dg.OutEdges[symID] {
+			depSym := dg.Symbols[depID]
+			if depSym == nil {
+				continue
+			}
+
+			depFile := depSym.File
+			if depFile == file || !stagedSet[depFile] {
+				continue
+			}
+
+			adj[file][depFile] = struct{}{}
+			adj[depFile][file] = struct{}{}
+		}
+	}
+}
+
+// connectedComponents finds connected components via BFS. Start nodes are
+// iterated in stagedGo order so component discovery is deterministic.
+func connectedComponents(
+	stagedGo []string,
+	adj map[string]map[string]struct{},
+) [][]string {
+	visited := make(map[string]bool, len(stagedGo))
+
+	var components [][]string
+
+	for _, start := range stagedGo {
+		if visited[start] {
+			continue
+		}
+
+		components = append(components, bfsComponent(start, adj, visited))
+	}
+
+	return components
+}
+
+// bfsComponent returns all nodes reachable from start via undirected edges,
+// marking each as visited.
+func bfsComponent(
+	start string,
+	adj map[string]map[string]struct{},
+	visited map[string]bool,
+) []string {
+	queue := []string{start}
+	visited[start] = true
+	component := []string{}
+
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+
+		component = append(component, node)
+
+		for neighbor := range adj[node] {
+			if visited[neighbor] {
+				continue
+			}
+
+			visited[neighbor] = true
+
+			queue = append(queue, neighbor)
+		}
+	}
+
+	return component
+}
+
+// sortChangesets sorts each component's files lexicographically (as relative
+// paths), then sorts components by their first element for deterministic output.
+func sortChangesets(components [][]string, absWorkDir string) [][]string {
+	result := make([][]string, 0, len(components))
+
+	for _, comp := range components {
+		relPaths := convertToRelativePaths(comp, absWorkDir)
+		sort.Strings(relPaths)
+		result = append(result, relPaths)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i][0] < result[j][0]
+	})
 
 	return result
 }
