@@ -58,6 +58,7 @@ Returns exit code 0 if the commit is atomic, 1 if violations are found.
 | `--dependants` | Include direct dependants when using `--committable` |
 | `--commit-msg <agent>` | Generate commit message using LLM agent (claude, codex, mistral, opencode) |
 | `--prompt-file <path>` | Custom prompt file for `--commit-msg` (default: built-in Conventional Commits prompt) |
+| `--single-changeset` | Fail if staged files contain multiple independent changesets that could be separate atomic commits |
 
 ### Progressive commit workflow
 
@@ -170,6 +171,35 @@ Files are sorted **lexicographically** by path. The first file that is independe
 
 Transitive dependants (dependants of dependants) are excluded to maintain atomicity.
 
+### Single-changeset detection
+
+`--single-changeset` runs *after* the atomicity check succeeds. It partitions the staged `.go` files into connected components based on direct symbol dependencies (in either direction) between staged files, and fails with exit code 1 when more than one component exists.
+
+Atomicity guarantees a commit is *complete* — every symbol it references is available. `--single-changeset` guarantees a commit is *cohesive* — it describes one logical change rather than several. A commit can be atomic without being cohesive: `{alpha.go, beta.go}` and `{service.go, types.go}` may each be self-contained, but bundling them into one commit forces reviewers to mentally split the diff.
+
+Example failure output:
+
+```
+Commit is atomic but contains 2 independent changesets. Split into separate commits:
+
+  Changeset 1:
+    alpha.go
+    beta.go
+
+  Changeset 2:
+    service.go
+    types.go
+
+To fix, run:
+   git reset
+   git add alpha.go beta.go
+   git commit -m "..."
+   git add service.go types.go
+   git commit -m "..."
+```
+
+See [ADR-003: Single-changeset detection for cohesive commits](docs/decisions/003.md) for the algorithm and rationale.
+
 ### Git pre-commit hook
 
 ```bash
@@ -184,7 +214,7 @@ Darna exits non-zero on violations, blocking the commit.
 1. **Git status** - categorize files as staged, unstaged, or untracked using `git status --porcelain -z`.
 2. **Package loading** - load all Go packages with full type information via `golang.org/x/tools/go/packages`. For partially staged files (status `MM`), an overlay with `git show :path` content ensures analysis reflects what will actually be committed.
 3. **Dependency graph** - walk `types.Info.Defs` and `types.Info.Uses` to build a bidirectional symbol dependency graph with transitive reachability.
-4. **Violation detection** - for each symbol in a staged file, check whether its dependencies are all satisfied by staged or committed files. Report any that require unstaged files.
+4. **Violation detection** - for each symbol in a staged file, check whether its dependencies are all satisfied by staged or committed files. Report any that require unstaged files. When `--single-changeset` is set, an additional pass builds an undirected graph over staged files (edge = direct symbol dependency between them) and reports connected components — failing when more than one exists.
 5. **Commit message generation (optional)** - when `--commit-msg` is used, invoke the specified LLM agent with `git diff --cached` content and the prompt (default or custom via `--prompt-file`), extract the first line of output, and return as the commit message.
 
 ## Project structure
