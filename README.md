@@ -1,5 +1,7 @@
 # darna
 
+[![CI](https://github.com/darccio/darna/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/darccio/darna/actions/workflows/ci.yml)
+
 Atomic commit validator for Go. Ensures staged files form a self-contained commit where every symbol used is defined in the staged changeset or in already-committed code - never in unstaged or untracked files.
 
 The name comes from Lithuanian *darna*, meaning harmony - the quality of a codebase where every commit is complete and coherent.
@@ -235,8 +237,13 @@ docs/decisions/      Architecture decision records
 make all      # lint + test + build
 make lint     # golangci-lint
 make test     # tests with race detector and coverage
+make coverage # tests with a coverage profile written to coverage.out
 make clean    # remove artifacts
 ```
+
+Every push to `main` and every pull request runs lint and tests on GitHub Actions.
+The test job publishes total coverage to the run summary and uploads `coverage.out`
+and `coverage.html` as artifacts.
 
 ## Documentation
 
