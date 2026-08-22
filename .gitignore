@@ -1,3 +1,5 @@
 /darna
 bin/darna
 internal/validator/testdata/project/testproject
+/coverage.out
+/coverage.html
