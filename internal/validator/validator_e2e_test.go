@@ -1,6 +1,7 @@
 package validator_test
 
 import (
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1749,23 +1750,99 @@ func TestFindCommittableSet_WithDependants_MultipleDependants(t *testing.T) {
 	}
 }
 
+// TestFindCommittableSet_WithDependants_DirectDependantWithUnrelatedChangesetDep
+// tests that a direct dependant is still excluded when it depends on a
+// changeset file that is neither baseFile nor another accepted dependant --
+// unlike the shared-helper case, this dependency has nothing to do with
+// baseFile, so pulling it in would produce a non-compiling commit.
+func TestFindCommittableSet_WithDependants_DirectDependantWithUnrelatedChangesetDep(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"FindCommittableSet - With Dependants - Unrelated Changeset Dependency",
+		"beacon.go (NewBeacon) <- {a_test.go (also uses sibling.go's SidecarValue), b_test.go}; "+
+			"sibling.go is unrelated and also in the changeset",
+		"Untracked [beacon.go, sibling.go, a_test.go, b_test.go]",
+		"Should return [beacon.go, b_test.go], excluding a_test.go (depends on unrelated sibling.go)")
+
+	repoDir := setupTestRepo(t)
+
+	createUntrackedFile(t, repoDir, "beacon.go", `package main
+
+// Beacon is a simple marker type.
+type Beacon struct{}
+
+// NewBeacon creates a beacon.
+func NewBeacon() *Beacon {
+	return &Beacon{}
+}
+`)
+	createUntrackedFile(t, repoDir, "sibling.go", `package main
+
+// SidecarValue is unrelated to Beacon.
+const SidecarValue = 42
+`)
+	createUntrackedFile(t, repoDir, "a_test.go", `package main
+
+import "testing"
+
+// TestAUsesBeaconAndSidecar calls NewBeacon directly but also depends on
+// sibling.go's SidecarValue, an unrelated changeset file.
+func TestAUsesBeaconAndSidecar(t *testing.T) {
+	b := NewBeacon()
+	_ = b
+	_ = SidecarValue
+}
+`)
+	createUntrackedFile(t, repoDir, "b_test.go", `package main
+
+import "testing"
+
+func TestBUsesBeacon(t *testing.T) {
+	b := NewBeacon()
+	_ = b
+}
+`)
+
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, true)
+	if err != nil {
+		t.Fatalf("FindCommittableSet with dependants failed: %v", err)
+	}
+
+	if !slices.Contains(files, "beacon.go") {
+		t.Errorf("Expected beacon.go (base file) in results, got %v", files)
+	}
+
+	if !slices.Contains(files, "b_test.go") {
+		t.Errorf("Expected b_test.go (direct dependant with no other changeset deps) in results, got %v", files)
+	}
+
+	if slices.Contains(files, "a_test.go") {
+		t.Errorf("Should NOT include a_test.go (depends on unrelated changeset file sibling.go), got %v", files)
+	}
+}
+
 // TestFindCommittableSet_WithDependants_ExcludeTransitiveDependants tests that
-// transitive dependants (dependants of dependants) are excluded.
+// transitive dependants (dependants of dependants that have no direct
+// dependency of their own on baseFile) are excluded. File gamma.go calls
+// only BetaFunc, never AlphaFunc directly, so it must stay out of the set
+// even though beta.go (a direct dependant of alpha.go) is included.
 func TestFindCommittableSet_WithDependants_ExcludeTransitiveDependants(t *testing.T) {
 	t.Parallel()
 
 	logTestPattern(t,
 		"FindCommittableSet - With Dependants - Exclude Transitive",
-		"types.go <- service.go <- main.go (chain)",
-		"Modified [types.go, service.go, main.go] | Unstaged [types.go, service.go, main.go]",
-		"Should return [types.go, service.go] excluding main.go (transitive)")
+		"alpha.go <- beta.go (calls AlphaFunc) <- gamma.go (calls only BetaFunc, chain)",
+		"Modified [alpha.go, beta.go, gamma.go] | Unstaged [alpha.go, beta.go, gamma.go]",
+		"Should return [alpha.go, beta.go] excluding gamma.go (transitive)")
 
 	repoDir := setupTestRepo(t)
 
-	// Modify types.go, service.go (depends on types.go), and main.go (depends on service.go).
-	modifyFile(t, filepath.Join(repoDir, "types.go"), testComment)
-	modifyFile(t, filepath.Join(repoDir, "service.go"), testComment)
-	modifyFile(t, filepath.Join(repoDir, "main.go"), testComment)
+	// Modify alpha.go, beta.go (depends on alpha.go), and gamma.go (depends
+	// only on beta.go, never alpha.go directly).
+	modifyFile(t, filepath.Join(repoDir, "alpha.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, "beta.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, "gamma.go"), testComment)
 
 	// With dependants flag.
 	files, err := validator.FindCommittableSet(t.Context(), repoDir, true)
@@ -1773,9 +1850,15 @@ func TestFindCommittableSet_WithDependants_ExcludeTransitiveDependants(t *testin
 		t.Fatalf("FindCommittableSet with dependants failed: %v", err)
 	}
 
-	// Main.go depends on service.go (which is in changeset), so it should be excluded.
-	if slices.Contains(files, "main.go") {
-		t.Errorf("Should NOT include main.go (depends on service.go in changeset), got %v", files)
+	// File gamma.go has no direct dependency on alpha.go (only on beta.go),
+	// so it should be excluded even though beta.go is committed alongside
+	// alpha.go.
+	if slices.Contains(files, "gamma.go") {
+		t.Errorf("Should NOT include gamma.go (only a transitive dependant via beta.go), got %v", files)
+	}
+
+	if !slices.Contains(files, "beta.go") {
+		t.Errorf("Expected beta.go in results (direct dependant of alpha.go), got %v", files)
 	}
 }
 
@@ -1831,6 +1914,293 @@ func TestFindCommittableSet_WithDependants_NoDependants(t *testing.T) {
 
 	if files[0] != "alpha.go" {
 		t.Errorf("Expected alpha.go, got %s", files[0])
+	}
+}
+
+// TestFindCommittableSet_WithDependants_SharedHelperAcrossTestFiles reproduces
+// a real false negative: a signature change to an exported function
+// (NewTracker) with direct callers spread across six _test.go files, two of
+// which also share a test helper defined in a third direct-dependant file.
+// A dependant must not be excluded merely because it ALSO depends on a
+// sibling file that is itself a direct dependant being committed in the same
+// set (previously, canCommitWithBase only allowed dependencies on baseFile
+// itself, so any dependant sharing a helper with another dependant was
+// wrongly dropped).
+func TestFindCommittableSet_WithDependants_SharedHelperAcrossTestFiles(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"FindCommittableSet - With Dependants - Shared Helper Across Test Files",
+		"tracker.go (NewTracker) <- {tracker_test.go, helpers_test.go, alpha_tracker_test.go,\n"+
+			"         gamma_tracker_test.go, delta_tracker_test.go} (direct callers); "+
+			"beta_tracker_test.go calls NewTracker only via helpers_test.go's helper (transitive, not direct)",
+		"Modified [all 7 files] | Unstaged [all 7 files] (signature change: NewTracker gains an error return)",
+		"Should return tracker.go plus all 5 direct dependants, excluding beta_tracker_test.go")
+
+	repoDir := setupTestRepo(t)
+
+	fileOrder := trackerFileOrder()
+
+	for _, name := range fileOrder {
+		createUntrackedFile(t, repoDir, name, trackerFilesOldSignature()[name])
+	}
+
+	stageFiles(t, repoDir, fileOrder...)
+	runGit(t, repoDir, "commit", "-m", "Add tracker with single-return NewTracker")
+
+	// Change NewTracker's signature to add an error return, and fix every
+	// caller accordingly -- all seven files become modified and unstaged.
+	for _, name := range fileOrder {
+		createUntrackedFile(t, repoDir, name, trackerFilesNewSignature()[name])
+	}
+
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, true)
+	if err != nil {
+		t.Fatalf("FindCommittableSet with dependants failed: %v", err)
+	}
+
+	assertTrackerDependants(t, files)
+}
+
+// trackerFileOrder lists the tracker test fixture files in a deterministic order.
+func trackerFileOrder() []string {
+	return []string{
+		"tracker.go", "tracker_test.go", "helpers_test.go",
+		"alpha_tracker_test.go", "beta_tracker_test.go",
+		"gamma_tracker_test.go", "delta_tracker_test.go",
+	}
+}
+
+// assertTrackerDependants checks that every direct caller of NewTracker is
+// present, and that the transitive-only caller (beta_tracker_test.go) is not.
+func assertTrackerDependants(t *testing.T, files []string) {
+	t.Helper()
+
+	expected := []string{
+		"tracker.go", "tracker_test.go", "helpers_test.go",
+		"alpha_tracker_test.go", "gamma_tracker_test.go", "delta_tracker_test.go",
+	}
+	for _, want := range expected {
+		if !slices.Contains(files, want) {
+			t.Errorf("Expected %s in results (direct caller of NewTracker), got %v", want, files)
+		}
+	}
+
+	if slices.Contains(files, "beta_tracker_test.go") {
+		t.Errorf("Should NOT include beta_tracker_test.go (only a transitive dependant via helpers_test.go), got %v", files)
+	}
+
+	if len(files) != len(expected) {
+		t.Errorf("Expected %d files, got %d: %v", len(expected), len(files), files)
+	}
+}
+
+// trackerFilesOldSignature returns the tracker fixture files with NewTracker's
+// original single-return signature.
+func trackerFilesOldSignature() map[string]string {
+	return map[string]string{
+		"tracker.go": `package main
+
+// Tracker tracks something against a cap.
+type Tracker struct {
+	Cap float64
+}
+
+// NewTracker creates a tracker.
+func NewTracker(cap float64) *Tracker {
+	return &Tracker{Cap: cap}
+}
+`,
+		"tracker_test.go": `package main
+
+import "testing"
+
+func TestNewTracker(t *testing.T) {
+	tr := NewTracker(1.0)
+	_ = tr
+}
+`,
+		"helpers_test.go": `package main
+
+import "testing"
+
+// newTestTracker is a shared test helper used by multiple _test.go files.
+func newTestTracker(t *testing.T) *Tracker {
+	t.Helper()
+
+	return NewTracker(2.0)
+}
+`,
+		"alpha_tracker_test.go": `package main
+
+import "testing"
+
+func TestAlphaUsesTracker(t *testing.T) {
+	tr := NewTracker(3.0)
+	_ = tr
+}
+`,
+		"beta_tracker_test.go": `package main
+
+import "testing"
+
+// TestBetaUsesTracker only calls NewTracker indirectly, via helpers_test.go's
+// helper -- it is a transitive dependant, not a direct one.
+func TestBetaUsesTracker(t *testing.T) {
+	tr := newTestTracker(t)
+	_ = tr
+}
+`,
+		"gamma_tracker_test.go": `package main
+
+import "testing"
+
+// TestGammaUsesTracker calls NewTracker directly AND uses the shared helper
+// from helpers_test.go, mirroring cache_test.go in the reported bug.
+func TestGammaUsesTracker(t *testing.T) {
+	tr := NewTracker(4.0)
+	helper := newTestTracker(t)
+	_ = tr
+	_ = helper
+}
+`,
+		"delta_tracker_test.go": `package main
+
+import "testing"
+
+// TestDeltaUsesTracker calls NewTracker directly AND uses the shared helper
+// from helpers_test.go, mirroring observability_test.go in the reported bug.
+func TestDeltaUsesTracker(t *testing.T) {
+	tr := NewTracker(5.0)
+	helper := newTestTracker(t)
+	_ = tr
+	_ = helper
+}
+`,
+	}
+}
+
+// trackerFilesNewSignature returns the tracker fixture files updated for
+// NewTracker's new (capUSD, error) signature.
+func trackerFilesNewSignature() map[string]string {
+	files := trackerFilesNewSignatureCore()
+	maps.Copy(files, trackerFilesNewSignatureTests())
+
+	return files
+}
+
+// trackerFilesNewSignatureCore returns the non-test tracker fixture files
+// updated for NewTracker's new (capUSD, error) signature.
+func trackerFilesNewSignatureCore() map[string]string {
+	return map[string]string{
+		"tracker.go": `package main
+
+import "errors"
+
+// Tracker tracks something against a cap.
+type Tracker struct {
+	Cap float64
+}
+
+// NewTracker creates a tracker, rejecting a negative cap.
+func NewTracker(cap float64) (*Tracker, error) {
+	if cap < 0 {
+		return nil, errors.New("negative cap")
+	}
+
+	return &Tracker{Cap: cap}, nil
+}
+`,
+		"tracker_test.go": `package main
+
+import "testing"
+
+func TestNewTracker(t *testing.T) {
+	tr, err := NewTracker(1.0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = tr
+}
+`,
+		"helpers_test.go": `package main
+
+import "testing"
+
+// newTestTracker is a shared test helper used by multiple _test.go files.
+func newTestTracker(t *testing.T) *Tracker {
+	t.Helper()
+
+	tr, err := NewTracker(2.0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return tr
+}
+`,
+	}
+}
+
+// trackerFilesNewSignatureTests returns the remaining _test.go tracker
+// fixture files updated for NewTracker's new (capUSD, error) signature.
+func trackerFilesNewSignatureTests() map[string]string {
+	return map[string]string{
+		"alpha_tracker_test.go": `package main
+
+import "testing"
+
+func TestAlphaUsesTracker(t *testing.T) {
+	tr, err := NewTracker(3.0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = tr
+}
+`,
+		"beta_tracker_test.go": `package main
+
+import "testing"
+
+// TestBetaUsesTracker only calls NewTracker indirectly, via helpers_test.go's
+// helper -- it is a transitive dependant, not a direct one.
+func TestBetaUsesTracker(t *testing.T) {
+	tr := newTestTracker(t)
+	_ = tr
+}
+`,
+		"gamma_tracker_test.go": `package main
+
+import "testing"
+
+// TestGammaUsesTracker calls NewTracker directly AND uses the shared helper
+// from helpers_test.go, mirroring cache_test.go in the reported bug.
+func TestGammaUsesTracker(t *testing.T) {
+	tr, err := NewTracker(4.0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := newTestTracker(t)
+	_ = tr
+	_ = helper
+}
+`,
+		"delta_tracker_test.go": `package main
+
+import "testing"
+
+// TestDeltaUsesTracker calls NewTracker directly AND uses the shared helper
+// from helpers_test.go, mirroring observability_test.go in the reported bug.
+func TestDeltaUsesTracker(t *testing.T) {
+	tr, err := NewTracker(5.0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := newTestTracker(t)
+	_ = tr
+	_ = helper
+}
+`,
 	}
 }
 
