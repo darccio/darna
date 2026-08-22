@@ -458,42 +458,22 @@ func isIndependent(
 	return true
 }
 
-// canCommitWithBase checks if a file can be committed together with baseFile.
-// Returns true if the file ONLY depends on:
+// canCommitWithBase checks if a file can be committed together with baseFile
+// and the given set of already-accepted dependants. Returns true if the file
+// ONLY depends on:
 // - baseFile itself
+// - Other files in the accepted set (fellow direct dependants of baseFile)
 // - Already committed files (not in changeset).
 func canCommitWithBase(
 	dg *graph.DependencyGraph,
 	file string,
 	baseFile string,
+	accepted map[string]bool,
 	changesetFiles map[string]bool,
 ) bool {
-	// Get all symbols defined in the file.
-	symbols := dg.FileSyms[file]
-
-	// Check each symbol's transitive dependencies.
-	for _, symID := range symbols {
-		deps := dg.TransitiveDeps(symID)
-		for _, depID := range deps {
-			depSym := dg.Symbols[depID]
-			if depSym == nil {
-				continue // External dependency, skip.
-			}
-
-			depFile := depSym.File
-
-			// Skip if dependency is the file itself (self-reference).
-			if depFile == file {
-				continue
-			}
-
-			// Allow dependencies on the base file.
-			if depFile == baseFile {
-				continue
-			}
-
-			// If dependency is in changeset (excluding baseFile and self), can't commit.
-			if changesetFiles[depFile] {
+	for _, symID := range dg.FileSyms[file] {
+		for _, depID := range dg.TransitiveDeps(symID) {
+			if !depAllowedWithBase(dg, depID, file, baseFile, accepted, changesetFiles) {
 				return false
 			}
 		}
@@ -502,19 +482,102 @@ func canCommitWithBase(
 	return true
 }
 
+// depAllowedWithBase reports whether a single dependency (depID, used by a
+// symbol defined in file) is compatible with committing file alongside
+// baseFile: it must resolve to an external (non-changeset) symbol, the file
+// itself, baseFile, or another accepted dependant of baseFile.
+func depAllowedWithBase(
+	dg *graph.DependencyGraph,
+	depID string,
+	file, baseFile string,
+	accepted, changesetFiles map[string]bool,
+) bool {
+	depSym := dg.Symbols[depID]
+	if depSym == nil {
+		return true // External dependency, allowed.
+	}
+
+	depFile := depSym.File
+
+	switch {
+	case depFile == file: // Self-reference.
+		return true
+	case depFile == baseFile:
+		return true
+	case accepted[depFile]:
+		// Fellow accepted dependant of baseFile, e.g. a shared test helper
+		// that also directly calls a symbol in baseFile and will be
+		// committed alongside it.
+		return true
+	case changesetFiles[depFile]:
+		return false
+	default:
+		return true
+	}
+}
+
 // findDirectDependants finds files that:
-// 1. Depend on baseFile
-// 2. Are in the changeset
-// 3. Have NO dependencies on OTHER changeset files (only baseFile + committed).
+// 1. Depend directly on a symbol defined in baseFile.
+// 2. Are in the changeset.
+// 3. Have no dependencies on OTHER changeset files, except baseFile and
+//    fellow direct dependants that also survive this filter.
+//
+// Direct dependants of baseFile commonly share helpers with each other
+// (e.g. sibling _test.go files calling a common setup function), so a
+// dependant is only excluded when it depends on a changeset file that is
+// NOT itself a direct dependant being committed in the same set.
 func findDirectDependants(
 	dg *graph.DependencyGraph,
 	baseFile string,
 	changesetFiles map[string]bool,
 ) []string {
-	dependantFiles := collectDependantFiles(dg, baseFile, changesetFiles)
-	validDependants := filterCommittableWithBase(dg, dependantFiles, baseFile, changesetFiles)
+	candidates := collectDependantFiles(dg, baseFile, changesetFiles)
+	accepted := pruneToFixedPoint(dg, candidates, baseFile, changesetFiles)
 
-	return sortFilesCopy(validDependants)
+	result := make([]string, 0, len(accepted))
+	for file := range accepted {
+		result = append(result, file)
+	}
+
+	return sortFilesCopy(result)
+}
+
+// pruneToFixedPoint repeatedly removes candidates that depend (among
+// changeset files) on something outside baseFile and the remaining
+// candidates, until no more removals happen. This lets direct dependants
+// that depend on each other (but still resolve within the committable set)
+// stay in, while still excluding dependants whose dependencies fall outside
+// the set entirely.
+func pruneToFixedPoint(
+	dg *graph.DependencyGraph,
+	candidates map[string]bool,
+	baseFile string,
+	changesetFiles map[string]bool,
+) map[string]bool {
+	accepted := make(map[string]bool, len(candidates))
+	for file := range candidates {
+		accepted[file] = true
+	}
+
+	for {
+		removedAny := false
+
+		for file := range accepted {
+			if canCommitWithBase(dg, file, baseFile, accepted, changesetFiles) {
+				continue
+			}
+
+			delete(accepted, file)
+
+			removedAny = true
+		}
+
+		if !removedAny {
+			break
+		}
+	}
+
+	return accepted
 }
 
 // collectDependantFiles finds all files that depend on baseFile and are in the changeset.
@@ -556,24 +619,6 @@ func collectSymbolDependants(
 			dependantFiles[dependentFile] = true
 		}
 	}
-}
-
-// filterCommittableWithBase filters files to only those committable with baseFile.
-func filterCommittableWithBase(
-	dg *graph.DependencyGraph,
-	dependantFiles map[string]bool,
-	baseFile string,
-	changesetFiles map[string]bool,
-) []string {
-	var result []string
-
-	for file := range dependantFiles {
-		if canCommitWithBase(dg, file, baseFile, changesetFiles) {
-			result = append(result, file)
-		}
-	}
-
-	return result
 }
 
 // DetectChangesets partitions staged .go files into independent changesets.
