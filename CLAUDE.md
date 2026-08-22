@@ -9,6 +9,10 @@ After each work request - one per prompt - always these steps before yielding th
 
 Atomic commits are the smallest logical unit of change where nothing can be removed and nothing needs to be added — each commit must compile, pass tests, and be independently reviewable. When developing, you build a patch set (a sequence of atomic commits on a feature branch) that tells a coherent story, then submit the entire patch set for review. Reviewers can examine individual commits in isolation or the whole diff, making reviews 1.5–5× faster. This approach requires linear history (no merge commits) and heavy use of interactive rebase (git rebase -i) to restructure, reorder, squash, or split commits before submitting. The key validation rule: every symbol (function, type, variable) used in a commit must be defined either in that same commit or in a previous commit — never in a future commit or unstaged file. This ensures any commit in history can be checked out and will work.
 
+# Architecture decision records
+
+Every new ADR (`docs/decisions/NNN.md`, ADR-004 onward) MUST follow the writing standard in [docs/decisions/README.md](docs/decisions/README.md): RFC-style numbered sections, RFC 2119 keywords for binding rules, and Simplified Technical English (STE) prose. Do not rewrite ADR-000 through ADR-003 to match it — they are historical records under the standard current when each was written.
+
 # Comments
 
 Always write comments following `godot` expectations:
