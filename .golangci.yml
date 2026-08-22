@@ -1,4 +1,4 @@
-version: 2
+version: "2"
 
 run:
   timeout: 5m
@@ -22,7 +22,6 @@ linters:
             - (github.com/golangci/golangci-lint/pkg/logutils.Log).Warnf
             - (github.com/golangci/golangci-lint/pkg/logutils.Log).Errorf
             - (github.com/golangci/golangci-lint/pkg/logutils.Log).Fatalf
-      check-shadowing: true  # Enable shadow detection
 
     staticcheck:
       checks: ["all"]  # Enables all 150+ checks across SA/S/ST/U/QF categories
@@ -148,10 +147,6 @@ linters:
       scope: all
       capital: true
 
-    wsl_v5:
-      allow-cuddle-declarations: false
-      force-err-cuddling: true
-
     exhaustruct:
       exclude: []  # Require all struct fields to be initialized
 
@@ -181,7 +176,6 @@ linters:
       statements: 50
 
 issues:
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
   new: false
