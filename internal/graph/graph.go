@@ -289,10 +289,30 @@ func (g *DependencyGraph) recordUsage(
 			}
 		}
 	case *ast.SelectorExpr:
-		if obj := pkg.TypesInfo.Uses[node.Sel]; obj != nil {
-			if calleeID := symbolID(obj); calleeID != "" {
-				g.AddDependency(callerID, calleeID)
-			}
+		g.recordSelectorUsage(pkg, callerID, node)
+	}
+}
+
+// recordSelectorUsage handles x.Sel expressions. A field selection (x.Baz)
+// edges to Baz's owning named type rather than to Baz itself: darna tracks
+// symbols at file granularity, a field is always declared in the same file
+// as its struct, and Baz's *types.Var carries no back-pointer to that
+// struct. A method or qualified-identifier selection edges to whatever
+// pkg.TypesInfo.Uses resolves node.Sel to, as before.
+func (g *DependencyGraph) recordSelectorUsage(
+	pkg *packages.Package, callerID string, node *ast.SelectorExpr,
+) {
+	if sel, ok := pkg.TypesInfo.Selections[node]; ok && sel.Kind() == types.FieldVal {
+		if ownerID := ownerTypeID(sel.Recv()); ownerID != "" {
+			g.AddDependency(callerID, ownerID)
+		}
+
+		return
+	}
+
+	if obj := pkg.TypesInfo.Uses[node.Sel]; obj != nil {
+		if calleeID := symbolID(obj); calleeID != "" {
+			g.AddDependency(callerID, calleeID)
 		}
 	}
 }
@@ -346,31 +366,46 @@ func methodOf(obj types.Object) (*types.Func, bool) {
 // "pkg/path.Type.Method". Returns "" when the receiver type is unnamed
 // (anonymous interface methods have no declaration file to attribute to).
 func methodSymbolID(fn *types.Func) string {
-	recvName := recvTypeName(fn.Signature().Recv().Type())
-	if recvName == "" {
+	named := namedRecvType(fn.Signature().Recv().Type())
+	if named == nil {
 		return ""
 	}
 
-	return fn.Pkg().Path() + "." + recvName + "." + fn.Name()
+	return fn.Pkg().Path() + "." + named.Obj().Name() + "." + fn.Name()
 }
 
-// recvTypeName extracts the declared type name from a method receiver type,
-// unwrapping pointers and resolving generic instantiations back to their
-// origin so a call on Stack[int] and the declaration of Stack[T] agree on
-// the same ID.
-func recvTypeName(recv types.Type) string {
-	recv = types.Unalias(recv)
-
-	if ptr, ok := recv.(*types.Pointer); ok {
-		recv = types.Unalias(ptr.Elem())
-	}
-
-	named, ok := recv.(*types.Named)
-	if !ok {
+// ownerTypeID returns the graph ID of the named type that owns a field
+// selection, e.g. "pkg/path.Type". For a promoted (embedded) field this is
+// the outer type, not the type declaring the field -- trackTypeSpecUsages
+// already records outer -> inner from the embedding, so the caller reaches
+// the declaring file transitively. Returns "" when t is not backed by a
+// named type (an anonymous struct, for instance).
+func ownerTypeID(t types.Type) string {
+	named := namedRecvType(t)
+	if named == nil || named.Obj().Pkg() == nil {
 		return ""
 	}
 
-	return named.Origin().Obj().Name()
+	return named.Obj().Pkg().Path() + "." + named.Obj().Name()
+}
+
+// namedRecvType unwraps a receiver-like type (an optional pointer around a
+// possibly-generic named type) down to its origin *types.Named, so a call
+// on Stack[int] and the declaration of Stack[T] agree on the same type.
+// Returns nil when t is not backed by a named type.
+func namedRecvType(t types.Type) *types.Named {
+	t = types.Unalias(t)
+
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = types.Unalias(ptr.Elem())
+	}
+
+	named, ok := t.(*types.Named)
+	if !ok {
+		return nil
+	}
+
+	return named.Origin()
 }
 
 // isPackageLevel reports whether obj is declared directly in its package

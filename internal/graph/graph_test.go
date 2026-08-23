@@ -415,3 +415,149 @@ func Use(w W) {
 		t.Errorf("Expected Use to depend on %s, deps: %v", writeID, g.OutEdges["testpkg.Use"])
 	}
 }
+
+func TestAnalyzePackage_FieldAccessEdgesToOwningType(t *testing.T) {
+	t.Parallel()
+
+	g := loadGraph(t, map[string]string{
+		"rec.go": `package testpkg
+
+type Rec struct {
+	Baz int
+}
+`,
+		"emit.go": `package testpkg
+
+func (r *Rec) Emit() int {
+	return r.Baz
+}
+`,
+	})
+
+	const (
+		emitID = "testpkg.Rec.Emit"
+		recID  = "testpkg.Rec"
+		bazID  = "testpkg.Baz"
+	)
+
+	if _, ok := g.OutEdges[emitID][recID]; !ok {
+		t.Errorf("Expected %s to depend on %s via field access, deps: %v", emitID, recID, g.OutEdges[emitID])
+	}
+
+	if _, ok := g.Symbols[bazID]; ok {
+		t.Errorf("Field Baz must not be registered as its own symbol")
+	}
+}
+
+func TestAnalyzePackage_FieldNameCollisionNoFalseEdge(t *testing.T) {
+	t.Parallel()
+
+	g := loadGraph(t, map[string]string{
+		"rec.go": `package testpkg
+
+type Rec struct {
+	Baz int
+}
+`,
+		"emit.go": `package testpkg
+
+func (r *Rec) Emit() int {
+	return r.Baz
+}
+`,
+		"other.go": `package testpkg
+
+func Baz() int { return 0 }
+`,
+	})
+
+	const (
+		emitID = "testpkg.Rec.Emit"
+		funcID = "testpkg.Baz"
+	)
+
+	if _, ok := g.OutEdges[emitID][funcID]; ok {
+		t.Errorf("%s must not depend on the unrelated package-level %s", emitID, funcID)
+	}
+}
+
+func TestAnalyzePackage_PromotedFieldReachesDeclaringFile(t *testing.T) {
+	t.Parallel()
+
+	g := loadGraph(t, map[string]string{
+		"inner.go": `package testpkg
+
+type Inner struct {
+	Val int
+}
+`,
+		"outer.go": `package testpkg
+
+type Outer struct {
+	Inner
+}
+`,
+		"use.go": `package testpkg
+
+func Use(o Outer) int {
+	return o.Val
+}
+`,
+	})
+
+	const (
+		useID   = "testpkg.Use"
+		outerID = "testpkg.Outer"
+		innerID = "testpkg.Inner"
+	)
+
+	if _, ok := g.OutEdges[useID][outerID]; !ok {
+		t.Errorf("Expected %s to depend on %s (the outer type), deps: %v", useID, outerID, g.OutEdges[useID])
+	}
+
+	if _, ok := g.OutEdges[outerID][innerID]; !ok {
+		t.Errorf("Expected %s to depend on %s (the embedded type), deps: %v", outerID, innerID, g.OutEdges[outerID])
+	}
+}
+
+func TestAnalyzePackage_ImportedPackageNameNotASymbol(t *testing.T) {
+	t.Parallel()
+
+	g := loadGraph(t, map[string]string{
+		"use.go": `package testpkg
+
+import "fmt"
+
+func Use() {
+	fmt.Println("hi")
+}
+`,
+	})
+
+	if _, ok := g.OutEdges["testpkg.Use"]["testpkg.fmt"]; ok {
+		t.Errorf("Use must not depend on a phantom testpkg.fmt symbol")
+	}
+}
+
+func TestAnalyzePackage_LocalVarShadowingPackageSymbol(t *testing.T) {
+	t.Parallel()
+
+	g := loadGraph(t, map[string]string{
+		"a.go": `package testpkg
+
+var config = 1
+`,
+		"b.go": `package testpkg
+
+func Use() int {
+	config := 2
+
+	return config
+}
+`,
+	})
+
+	if _, ok := g.OutEdges["testpkg.Use"]["testpkg.config"]; ok {
+		t.Errorf("Use must not depend on testpkg.config via its shadowing local variable")
+	}
+}
