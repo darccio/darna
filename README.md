@@ -62,6 +62,12 @@ Returns exit code 0 if the commit is atomic, 1 if violations are found.
 | `--prompt-file <path>` | Custom prompt file for `--commit-msg` (default: built-in Conventional Commits prompt) |
 | `--single-changeset` | Fail if staged files contain multiple independent changesets that could be separate atomic commits |
 
+### Environment
+
+| Variable | Description |
+|---|---|
+| `DARNA_ALLOW_MULTI_CHANGESET` | Set to `1`, `true`, or `yes` to override a `--single-changeset` split for the current commit only. See [Single-changeset detection](#single-changeset-detection). |
+
 ### Progressive commit workflow
 
 #### Single file mode
@@ -179,10 +185,15 @@ Transitive dependants (dependants of dependants) are excluded to maintain atomic
 
 Atomicity guarantees a commit is *complete* — every symbol it references is available. `--single-changeset` guarantees a commit is *cohesive* — it describes one logical change rather than several. A commit can be atomic without being cohesive: `{alpha.go, beta.go}` and `{service.go, types.go}` may each be self-contained, but bundling them into one commit forces reviewers to mentally split the diff.
 
-Example failure output:
+The check is static analysis: it can see compile-time symbol dependencies (function calls, types, methods, field access) but not runtime coupling such as string keys, reflection, build tags, `go:generate` output, table-driven test data, or init-order effects. A reported split can be a false positive. Example failure output:
 
 ```
-Commit is atomic but contains 2 independent changesets. Split into separate commits:
+Commit is atomic but appears to contain 2 independent changesets.
+
+darna found no compile-time dependency between these groups. It cannot see
+runtime coupling: string keys, reflection, build tags, go:generate output,
+table-driven test data, or init-order effects. If these files really belong
+together, this is a false positive.
 
   Changeset 1:
     alpha.go
@@ -192,15 +203,20 @@ Commit is atomic but contains 2 independent changesets. Split into separate comm
     service.go
     types.go
 
-To fix, run:
+If they are separate concerns, split them:
    git reset
    git add alpha.go beta.go
    git commit -m "..."
    git add service.go types.go
    git commit -m "..."
+
+If they belong together, keep the commit as is:
+   DARNA_ALLOW_MULTI_CHANGESET=1 git commit ...
 ```
 
-See [ADR-003: Single-changeset detection for cohesive commits](docs/decisions/003.md) for the algorithm and rationale.
+If you've verified the staged set really is one atomic unit, commit with `DARNA_ALLOW_MULTI_CHANGESET=1` set — this works with an already-installed pre-commit hook, since git passes its environment through. The override prints a one-line notice to stderr so it never suppresses a split silently.
+
+See [ADR-003: Single-changeset detection for cohesive commits](docs/decisions/003.md) for the algorithm and rationale, and [ADR-004: Receiver-qualified graph symbols and the changeset-detection override](docs/decisions/004.md) for the static-analysis-limits caveat and the override mechanism.
 
 ### Git pre-commit hook
 
@@ -215,7 +231,7 @@ Darna exits non-zero on violations, blocking the commit.
 
 1. **Git status** - categorize files as staged, unstaged, or untracked using `git status --porcelain -z`.
 2. **Package loading** - load all Go packages with full type information via `golang.org/x/tools/go/packages`. For partially staged files (status `MM`), an overlay with `git show :path` content ensures analysis reflects what will actually be committed.
-3. **Dependency graph** - walk `types.Info.Defs` and `types.Info.Uses` to build a bidirectional symbol dependency graph with transitive reachability.
+3. **Dependency graph** - walk `types.Info.Defs` and `types.Info.Uses` to build a bidirectional symbol dependency graph with transitive reachability. Package-level functions, types, vars, and consts are tracked directly; methods are tracked under a receiver-qualified ID (`pkg.Type.Method`) so they never collide with same-named package-level functions; struct field accesses resolve to their owning type rather than being tracked as separate symbols.
 4. **Violation detection** - for each symbol in a staged file, check whether its dependencies are all satisfied by staged or committed files. Report any that require unstaged files. When `--single-changeset` is set, an additional pass builds an undirected graph over staged files (edge = direct symbol dependency between them) and reports connected components — failing when more than one exists.
 5. **Commit message generation (optional)** - when `--commit-msg` is used, invoke the specified LLM agent with `git diff --cached` content and the prompt (default or custom via `--prompt-file`), extract the first line of output, and return as the commit message.
 
