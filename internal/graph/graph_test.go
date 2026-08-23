@@ -177,3 +177,213 @@ const Pi = 3.14
 		t.Errorf("Expected Foo to depend on Bar")
 	}
 }
+
+// loadGraph writes files (name -> source) plus a go.mod into a temp module
+// named "testpkg", loads it, and returns the resulting dependency graph.
+func loadGraph(t *testing.T, files map[string]string) *graph.DependencyGraph {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+
+	for name, content := range files {
+		path := filepath.Join(tmpDir, name)
+
+		err := os.WriteFile(path, []byte(content), 0o600)
+		if err != nil {
+			t.Fatalf("Failed to write %s: %v", name, err)
+		}
+	}
+
+	modPath := filepath.Join(tmpDir, "go.mod")
+
+	err := os.WriteFile(modPath, []byte("module testpkg\n\ngo 1.24\n"), 0o600)
+	if err != nil {
+		t.Fatalf("Failed to write go.mod: %v", err)
+	}
+
+	pkgs, err := analyzer.LoadPackages(tmpDir, nil, "./...")
+	if err != nil {
+		t.Fatalf("LoadPackages() error = %v", err)
+	}
+
+	g := graph.NewDependencyGraph()
+	for _, pkg := range pkgs {
+		g.AnalyzePackage(pkg)
+	}
+
+	return g
+}
+
+func TestAnalyzePackage_MethodRegisteredWithQualifiedID(t *testing.T) {
+	t.Parallel()
+
+	g := loadGraph(t, map[string]string{
+		"rec.go": `package testpkg
+
+type Rec struct {
+	Baz int
+}
+`,
+		"emit.go": `package testpkg
+
+func (r *Rec) Emit() int {
+	return r.Baz
+}
+`,
+	})
+
+	const emitID = "testpkg.Rec.Emit"
+
+	sym, ok := g.Symbols[emitID]
+	if !ok {
+		t.Fatalf("Expected %s to be registered, symbols: %v", emitID, g.Symbols)
+	}
+
+	if sym.Kind != "method" {
+		t.Errorf("Expected Kind = %q, got %q", "method", sym.Kind)
+	}
+
+	if filepath.Base(sym.File) != "emit.go" {
+		t.Errorf("Expected File to end in emit.go, got %q", sym.File)
+	}
+
+	found := false
+
+	for _, id := range g.FileSyms[sym.File] {
+		if id == emitID {
+			found = true
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected FileSyms[%s] to contain %s, got %v", sym.File, emitID, g.FileSyms[sym.File])
+	}
+}
+
+func TestAnalyzePackage_MethodNameCollisionNoFalseEdge(t *testing.T) {
+	t.Parallel()
+
+	g := loadGraph(t, map[string]string{
+		"rec.go": `package testpkg
+
+type Rec struct{}
+
+func (r *Rec) Emit() {}
+`,
+		"other.go": `package testpkg
+
+func Emit() {}
+`,
+		"use.go": `package testpkg
+
+func Use(r *Rec) {
+	r.Emit()
+}
+`,
+	})
+
+	const (
+		methodID = "testpkg.Rec.Emit"
+		funcID   = "testpkg.Emit"
+	)
+
+	if _, ok := g.OutEdges["testpkg.Use"][methodID]; !ok {
+		t.Errorf("Expected Use to depend on %s, deps: %v", methodID, g.OutEdges["testpkg.Use"])
+	}
+
+	if _, ok := g.OutEdges["testpkg.Use"][funcID]; ok {
+		t.Errorf("Use must not depend on the unrelated package-level %s", funcID)
+	}
+}
+
+func TestAnalyzePackage_GenericMethodBodyTracked(t *testing.T) {
+	t.Parallel()
+
+	g := loadGraph(t, map[string]string{
+		"stack.go": `package testpkg
+
+type Stack[T any] struct {
+	items []T
+}
+
+func (s *Stack[T]) Push(v T) {
+	helper()
+	s.items = append(s.items, v)
+}
+`,
+		"helper.go": `package testpkg
+
+func helper() {}
+`,
+	})
+
+	const pushID = "testpkg.Stack.Push"
+
+	if _, ok := g.Symbols[pushID]; !ok {
+		t.Fatalf("Expected %s to be registered, symbols: %v", pushID, g.Symbols)
+	}
+
+	if _, ok := g.OutEdges[pushID]["testpkg.helper"]; !ok {
+		t.Errorf("Expected %s to depend on testpkg.helper, deps: %v", pushID, g.OutEdges[pushID])
+	}
+}
+
+func TestAnalyzePackage_GenericInstantiationMatchesOrigin(t *testing.T) {
+	t.Parallel()
+
+	g := loadGraph(t, map[string]string{
+		"stack.go": `package testpkg
+
+type Stack[T any] struct {
+	items []T
+}
+
+func (s *Stack[T]) Push(v T) {
+	s.items = append(s.items, v)
+}
+`,
+		"use.go": `package testpkg
+
+func Use() {
+	var s Stack[int]
+	s.Push(1)
+}
+`,
+	})
+
+	const pushID = "testpkg.Stack.Push"
+
+	if _, ok := g.OutEdges["testpkg.Use"][pushID]; !ok {
+		t.Errorf("Expected Use to depend on %s (not an instantiated form), deps: %v",
+			pushID, g.OutEdges["testpkg.Use"])
+	}
+}
+
+func TestAnalyzePackage_InterfaceMethodRegistered(t *testing.T) {
+	t.Parallel()
+
+	g := loadGraph(t, map[string]string{
+		"writer.go": `package testpkg
+
+type W interface {
+	Write()
+}
+`,
+		"use.go": `package testpkg
+
+func Use(w W) {
+	w.Write()
+}
+`,
+	})
+
+	const writeID = "testpkg.W.Write"
+
+	if _, ok := g.Symbols[writeID]; !ok {
+		t.Fatalf("Expected %s to be registered, symbols: %v", writeID, g.Symbols)
+	}
+
+	if _, ok := g.OutEdges["testpkg.Use"][writeID]; !ok {
+		t.Errorf("Expected Use to depend on %s, deps: %v", writeID, g.OutEdges["testpkg.Use"])
+	}
+}

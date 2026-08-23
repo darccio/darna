@@ -809,7 +809,7 @@ func TestValidateAtomicCommit_SpecificSymbol_Method(t *testing.T) {
 		"Method Symbol Dependency",
 		"calculator_user.go (UseCalculator func) -> calculator.go (Calculator type + Add method)",
 		"Modified [calculator_user.go, calculator.go] | Staged [calculator_user.go] | Unstaged [calculator.go]",
-		"Violation tracking method: UseCalculator -> Calculator.Add or Calculator type")
+		"Violation tracking method: UseCalculator -> Calculator.Add")
 
 	repoDir := setupTestRepo(t)
 
@@ -829,23 +829,21 @@ func TestValidateAtomicCommit_SpecificSymbol_Method(t *testing.T) {
 		t.Fatal("Expected violations for method dependency, got none")
 	}
 
-	// Verify method or type symbol is tracked (could be Calculator type or Add method).
+	// The method symbol must be tracked precisely as Calculator.Add, not just
+	// via the Calculator type composite literal.
 	found := false
 
 	for _, v := range violations {
-		if v.StagedFile == "calculator_user.go" && v.MissingFile == "calculator.go" {
-			// Accept either Calculator type or Calculator.Add method.
-			if v.MissingSymbol == "example.com/testproject.Calculator" ||
-				v.MissingSymbol == "example.com/testproject.Calculator.Add" {
-				found = true
+		if v.StagedFile == "calculator_user.go" && v.MissingFile == "calculator.go" &&
+			v.MissingSymbol == "example.com/testproject.Calculator.Add" {
+			found = true
 
-				break
-			}
+			break
 		}
 	}
 
 	if !found {
-		t.Errorf("Expected violation tracking Calculator type or Add method, violations: %+v", violations)
+		t.Errorf("Expected violation tracking Calculator.Add method, violations: %+v", violations)
 	}
 }
 
