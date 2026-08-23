@@ -22,6 +22,11 @@ const (
 	fileHelperFmtGo    = "helper/formatter.go"
 	fileHelperValidGo  = "helper/validator.go"
 	fileModelsResponse = "models/response.go"
+
+	// Method/field coupling fixtures shared by several tests below.
+	fileLogicGo     = "logic.go"
+	emitterSource   = "package main\n\ntype Emitter struct{ Name string }\n"
+	emitterSymbolID = "example.com/testproject.Emitter"
 )
 
 // setupTestRepo creates a temporary git repository with the test project.
@@ -809,7 +814,7 @@ func TestValidateAtomicCommit_SpecificSymbol_Method(t *testing.T) {
 		"Method Symbol Dependency",
 		"calculator_user.go (UseCalculator func) -> calculator.go (Calculator type + Add method)",
 		"Modified [calculator_user.go, calculator.go] | Staged [calculator_user.go] | Unstaged [calculator.go]",
-		"Violation tracking method: UseCalculator -> Calculator.Add or Calculator type")
+		"Violation tracking method: UseCalculator -> Calculator.Add")
 
 	repoDir := setupTestRepo(t)
 
@@ -829,24 +834,90 @@ func TestValidateAtomicCommit_SpecificSymbol_Method(t *testing.T) {
 		t.Fatal("Expected violations for method dependency, got none")
 	}
 
-	// Verify method or type symbol is tracked (could be Calculator type or Add method).
+	// The method symbol must be tracked precisely as Calculator.Add, not just
+	// via the Calculator type composite literal.
 	found := false
 
 	for _, v := range violations {
-		if v.StagedFile == "calculator_user.go" && v.MissingFile == "calculator.go" {
-			// Accept either Calculator type or Calculator.Add method.
-			if v.MissingSymbol == "example.com/testproject.Calculator" ||
-				v.MissingSymbol == "example.com/testproject.Calculator.Add" {
-				found = true
+		if v.StagedFile == "calculator_user.go" && v.MissingFile == "calculator.go" &&
+			v.MissingSymbol == "example.com/testproject.Calculator.Add" {
+			found = true
 
-				break
-			}
+			break
 		}
 	}
 
 	if !found {
-		t.Errorf("Expected violation tracking Calculator type or Add method, violations: %+v", violations)
+		t.Errorf("Expected violation tracking Calculator.Add method, violations: %+v", violations)
 	}
+}
+
+// assertUnstagedEmitterViolation stages depFile alongside a committed
+// logic.go (defining Emitter), leaves logic.go's own modification unstaged,
+// and asserts ValidateAtomicCommit reports a violation from depFile to
+// Emitter. Shared by the receiver-type and field-access coupling tests
+// below, which differ only in depFile's content.
+func assertUnstagedEmitterViolation(t *testing.T, depFile, depContent string) {
+	t.Helper()
+
+	repoDir := setupTestRepo(t)
+
+	createUntrackedFile(t, repoDir, fileLogicGo, emitterSource)
+	createUntrackedFile(t, repoDir, depFile, depContent)
+	stageFiles(t, repoDir, fileLogicGo, depFile)
+	runGit(t, repoDir, "commit", "-m", "Add Emitter and "+depFile)
+
+	modifyFile(t, filepath.Join(repoDir, depFile), testComment)
+	modifyFile(t, filepath.Join(repoDir, fileLogicGo), testComment)
+	stageFiles(t, repoDir, depFile)
+
+	violations, err := validator.ValidateAtomicCommit(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("ValidateAtomicCommit failed: %v", err)
+	}
+
+	found := false
+
+	for _, v := range violations {
+		if v.StagedFile == depFile && v.MissingFile == fileLogicGo && v.MissingSymbol == emitterSymbolID {
+			found = true
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected violation tracking %s -> %s, violations: %+v", depFile, emitterSymbolID, violations)
+	}
+}
+
+// TestValidateAtomicCommit_MethodOnUnstagedReceiverType reproduces the
+// reported false negative: emit.go's only coupling to logic.go is its
+// method receiver type (no type literal, no field access), which
+// trackFuncBodyUsages did not inspect before this fix.
+func TestValidateAtomicCommit_MethodOnUnstagedReceiverType(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"Method Depends On Unstaged Receiver Type",
+		"emit.go (func (e *Emitter) Emit()) -> logic.go (type Emitter)",
+		"Modified [emit.go, logic.go] | Staged [emit.go] | Unstaged [logic.go]",
+		"Violation tracking receiver type: Emitter.Emit -> Emitter")
+
+	assertUnstagedEmitterViolation(t, "emit.go", "package main\n\nfunc (e *Emitter) Emit() {}\n")
+}
+
+// TestValidateAtomicCommit_FieldAccessOnUnstagedType isolates the field
+// selection fix from the receiver-type fix: reader.go is a plain function
+// (no receiver) that only reads a field of a struct defined in logic.go.
+func TestValidateAtomicCommit_FieldAccessOnUnstagedType(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"Field Access Depends On Unstaged Owning Type",
+		"reader.go (func ReadName(e *Emitter) string { return e.Name }) -> logic.go (type Emitter)",
+		"Modified [reader.go, logic.go] | Staged [reader.go] | Unstaged [logic.go]",
+		"Violation tracking field owner: ReadName -> Emitter")
+
+	assertUnstagedEmitterViolation(t, "reader.go", "package main\n\nfunc ReadName(e *Emitter) string { return e.Name }\n")
 }
 
 func TestValidateAtomicCommit_MultipleSymbols_PartialViolation(t *testing.T) {
@@ -1711,6 +1782,53 @@ func TestFindCommittableSet_WithDependants_SingleDependant(t *testing.T) {
 		if !expectedFiles[f] {
 			t.Errorf("Unexpected file in result: %s", f)
 		}
+	}
+}
+
+// TestFindCommittableSet_WithDependants_MethodDependant closes the
+// collectSymbolDependants gap: a dependant whose only coupling to the base
+// file is a method body used to be silently dropped, because method caller
+// IDs were absent from dg.Symbols. The base file defines Emitter, and
+// emit.go is a method-only file with no other symbols.
+func TestFindCommittableSet_WithDependants_MethodDependant(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"FindCommittableSet - With Dependants - Method Dependant",
+		"logic.go (type Emitter, independent) <- emit.go (func (e *Emitter) Emit(), method-only)",
+		"Modified [logic.go, emit.go] | Unstaged [logic.go, emit.go]",
+		"Should return [logic.go, emit.go] when --dependants is used")
+
+	repoDir := setupTestRepo(t)
+
+	createUntrackedFile(t, repoDir, fileLogicGo, emitterSource)
+	createUntrackedFile(t, repoDir, "emit.go", "package main\n\nfunc (e *Emitter) Emit() {}\n")
+	stageFiles(t, repoDir, fileLogicGo, "emit.go")
+	runGit(t, repoDir, "commit", "-m", "Add Emitter and Emit")
+
+	modifyFile(t, filepath.Join(repoDir, fileLogicGo), testComment)
+	modifyFile(t, filepath.Join(repoDir, "emit.go"), testComment)
+
+	files, err := validator.FindCommittableSet(t.Context(), repoDir, false)
+	if err != nil {
+		t.Fatalf("FindCommittableSet failed: %v", err)
+	}
+
+	if len(files) != 1 || files[0] != fileLogicGo {
+		t.Fatalf("Without dependants: expected [logic.go], got %v", files)
+	}
+
+	files, err = validator.FindCommittableSet(t.Context(), repoDir, true)
+	if err != nil {
+		t.Fatalf("FindCommittableSet with dependants failed: %v", err)
+	}
+
+	if !slices.Contains(files, "emit.go") {
+		t.Errorf("Expected emit.go (method dependant) in result, got %v", files)
+	}
+
+	if len(files) != 2 {
+		t.Fatalf("With dependants: expected 2 files, got %d: %v", len(files), files)
 	}
 }
 
@@ -2631,6 +2749,115 @@ func TestDetectChangesets_NoStagedFiles(t *testing.T) {
 	if got != nil {
 		t.Errorf("Expected nil for no staged files, got %v", got)
 	}
+}
+
+// TestDetectChangesets_MethodCoupledByReceiverAndFields_OneGroup reproduces
+// the reported bug: emit.go's only coupling to logic.go/logic_test.go is
+// through its method receiver and field reads on Emitter, with no type
+// literal anywhere in emit.go to mask the missing edge. Before the graph
+// fix, darna reported this as two independent changesets and recommended a
+// split whose first commit compiles but whose test fails.
+func TestDetectChangesets_MethodCoupledByReceiverAndFields_OneGroup(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"DetectChangesets - Method Coupled By Receiver And Fields",
+		"logic.go (type Emitter) <- emit.go (func (e *Emitter) Emit(), reads e.name/e.level only) <- logic_test.go",
+		"Modified [logic.go, emit.go, logic_test.go] | Staged [all]",
+		"1 changeset containing all three files")
+
+	repoDir := setupTestRepo(t)
+
+	createUntrackedFile(t, repoDir, fileLogicGo,
+		"package main\n\ntype Emitter struct {\n\tname  string\n\tlevel string\n}\n")
+	createUntrackedFile(t, repoDir, "emit.go",
+		"package main\n\nfunc (e *Emitter) Emit() string {\n\treturn e.name + \":\" + e.level\n}\n")
+	createUntrackedFile(t, repoDir, "logic_test.go",
+		"package main\n\nimport \"testing\"\n\n"+
+			"func TestEmit(t *testing.T) {\n\te := Emitter{name: \"n\", level: \"l\"}\n\t_ = e.Emit()\n}\n")
+	stageFiles(t, repoDir, fileLogicGo, "emit.go", "logic_test.go")
+	runGit(t, repoDir, "commit", "-m", "Add Emitter, Emit, and its test")
+
+	modifyFile(t, filepath.Join(repoDir, fileLogicGo), testComment)
+	modifyFile(t, filepath.Join(repoDir, "emit.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, "logic_test.go"), testComment)
+	stageFiles(t, repoDir, fileLogicGo, "emit.go", "logic_test.go")
+
+	got, err := validator.DetectChangesets(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("DetectChangesets failed: %v", err)
+	}
+
+	assertChangesets(t, got, [][]string{{"emit.go", fileLogicGo, "logic_test.go"}})
+}
+
+// TestDetectChangesets_MethodOnlyFile_NotIsolated is the minimal two-file
+// version of the reported bug: a method-only file must not become its own
+// changeset just because it defines no package-level symbol.
+func TestDetectChangesets_MethodOnlyFile_NotIsolated(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"DetectChangesets - Method Only File Not Isolated",
+		"logic.go (type Emitter) <- emit.go (func (e *Emitter) Emit())",
+		"Modified [logic.go, emit.go] | Staged [both]",
+		"1 changeset containing both files")
+
+	repoDir := setupTestRepo(t)
+
+	createUntrackedFile(t, repoDir, fileLogicGo, emitterSource)
+	createUntrackedFile(t, repoDir, "emit.go", "package main\n\nfunc (e *Emitter) Emit() {}\n")
+	stageFiles(t, repoDir, fileLogicGo, "emit.go")
+	runGit(t, repoDir, "commit", "-m", "Add Emitter and Emit")
+
+	modifyFile(t, filepath.Join(repoDir, fileLogicGo), testComment)
+	modifyFile(t, filepath.Join(repoDir, "emit.go"), testComment)
+	stageFiles(t, repoDir, fileLogicGo, "emit.go")
+
+	got, err := validator.DetectChangesets(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("DetectChangesets failed: %v", err)
+	}
+
+	assertChangesets(t, got, [][]string{{"emit.go", fileLogicGo}})
+}
+
+// TestDetectChangesets_FieldNameCollision_NoFalseMerge locks the collision
+// fix at the integration level: unrelated.go's package-level Level function
+// shares a name with the Level field emit.go reads. Without the guard in
+// symbolID, that collision would wrongly merge the two into one changeset.
+func TestDetectChangesets_FieldNameCollision_NoFalseMerge(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"DetectChangesets - Field Name Collision No False Merge",
+		"logic.go (type Emitter{Level string}) <- emit.go (reads e.Level); unrelated.go (func Level()) is separate",
+		"Modified [logic.go, emit.go, unrelated.go] | Staged [all]",
+		"2 changesets: {emit, logic} and {unrelated}")
+
+	repoDir := setupTestRepo(t)
+
+	createUntrackedFile(t, repoDir, fileLogicGo, "package main\n\ntype Emitter struct {\n\tLevel string\n}\n")
+	createUntrackedFile(t, repoDir, "emit.go",
+		"package main\n\nfunc (e *Emitter) Emit() string {\n\treturn e.Level\n}\n")
+	createUntrackedFile(t, repoDir, "unrelated.go", "package main\n\nfunc Level() string {\n\treturn \"\"\n}\n")
+	stageFiles(t, repoDir, fileLogicGo, "emit.go", "unrelated.go")
+	runGit(t, repoDir, "commit", "-m", "Add Emitter, Emit, and unrelated Level func")
+
+	modifyFile(t, filepath.Join(repoDir, fileLogicGo), testComment)
+	modifyFile(t, filepath.Join(repoDir, "emit.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, "unrelated.go"), testComment)
+	stageFiles(t, repoDir, fileLogicGo, "emit.go", "unrelated.go")
+
+	got, err := validator.DetectChangesets(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("DetectChangesets failed: %v", err)
+	}
+
+	assertChangesets(t, got, [][]string{
+		{"emit.go", fileLogicGo},
+		{"unrelated.go"},
+	})
 }
 
 // TestValidateAtomicCommit_WorktreeOnlyFileDoesNotBreakAnalysis verifies that

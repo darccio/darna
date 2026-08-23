@@ -115,7 +115,7 @@ func (g *DependencyGraph) TransitiveDependents(targetID string) []string {
 
 func (g *DependencyGraph) registerDefinitions(pkg *packages.Package) {
 	for _, obj := range pkg.TypesInfo.Defs {
-		if obj == nil || obj.Pkg() == nil || obj.Parent() != pkg.Types.Scope() {
+		if !shouldRegister(obj) {
 			continue
 		}
 
@@ -123,16 +123,46 @@ func (g *DependencyGraph) registerDefinitions(pkg *packages.Package) {
 			ID:      symbolID(obj),
 			Name:    obj.Name(),
 			Package: obj.Pkg().Path(),
-			Kind:    analyzer.ObjectKind(obj),
+			Kind:    objectKind(obj),
 			File:    pkg.Fset.Position(obj.Pos()).Filename,
 			Pos:     pkg.Fset.Position(obj.Pos()),
 		}
+		if sym.ID == "" {
+			continue
+		}
+
 		if _, exists := g.Symbols[sym.ID]; !exists {
 			g.FileSyms[sym.File] = append(g.FileSyms[sym.File], sym.ID)
 		}
 
 		g.Symbols[sym.ID] = sym
 	}
+}
+
+// shouldRegister reports whether obj is a symbol darna tracks: a method
+// (regardless of receiver scope, since Object.Parent is nil for methods) or
+// a package-level declaration. Locals, parameters, and struct fields are
+// excluded.
+func shouldRegister(obj types.Object) bool {
+	if obj == nil || obj.Pkg() == nil {
+		return false
+	}
+
+	if _, isMethod := methodOf(obj); isMethod {
+		return true
+	}
+
+	return isPackageLevel(obj)
+}
+
+// objectKind returns the graph's kind label for obj, treating methods as a
+// distinct kind from package-level functions.
+func objectKind(obj types.Object) string {
+	if _, isMethod := methodOf(obj); isMethod {
+		return "method"
+	}
+
+	return analyzer.ObjectKind(obj)
 }
 
 func (g *DependencyGraph) trackUsages(pkg *packages.Package) {
@@ -203,7 +233,7 @@ func collectValueSpecCallerIDs(pkg *packages.Package, vs *ast.ValueSpec) []strin
 
 	for _, name := range vs.Names {
 		obj := pkg.TypesInfo.Defs[name]
-		if obj == nil || obj.Parent() != pkg.Types.Scope() {
+		if obj == nil || !isPackageLevel(obj) {
 			continue
 		}
 
@@ -219,6 +249,17 @@ func collectValueSpecCallerIDs(pkg *packages.Package, vs *ast.ValueSpec) []strin
 func (g *DependencyGraph) trackFuncBodyUsages(
 	pkg *packages.Package, callerID string, fn *ast.FuncDecl,
 ) {
+	// Track usages in the receiver, so a method depends on its receiver
+	// type (staging emit.go without its unstaged receiver type is a real
+	// atomicity violation).
+	if fn.Recv != nil {
+		ast.Inspect(fn.Recv, func(inner ast.Node) bool {
+			g.recordUsage(pkg, callerID, inner)
+
+			return true
+		})
+	}
+
 	// Track usages in function signature (parameter and return types).
 	ast.Inspect(fn.Type, func(inner ast.Node) bool {
 		g.recordUsage(pkg, callerID, inner)
@@ -248,42 +289,127 @@ func (g *DependencyGraph) recordUsage(
 			}
 		}
 	case *ast.SelectorExpr:
-		if obj := pkg.TypesInfo.Uses[node.Sel]; obj != nil {
-			if calleeID := symbolID(obj); calleeID != "" {
-				g.AddDependency(callerID, calleeID)
-			}
+		g.recordSelectorUsage(pkg, callerID, node)
+	}
+}
+
+// recordSelectorUsage handles x.Sel expressions. A field selection (x.Baz)
+// edges to Baz's owning named type rather than to Baz itself: darna tracks
+// symbols at file granularity, a field is always declared in the same file
+// as its struct, and Baz's *types.Var carries no back-pointer to that
+// struct. A method or qualified-identifier selection edges to whatever
+// pkg.TypesInfo.Uses resolves node.Sel to, as before.
+func (g *DependencyGraph) recordSelectorUsage(
+	pkg *packages.Package, callerID string, node *ast.SelectorExpr,
+) {
+	if sel, ok := pkg.TypesInfo.Selections[node]; ok && sel.Kind() == types.FieldVal {
+		if ownerID := ownerTypeID(sel.Recv()); ownerID != "" {
+			g.AddDependency(callerID, ownerID)
+		}
+
+		return
+	}
+
+	if obj := pkg.TypesInfo.Uses[node.Sel]; obj != nil {
+		if calleeID := symbolID(obj); calleeID != "" {
+			g.AddDependency(callerID, calleeID)
 		}
 	}
 }
 
+// callerSymbolID resolves the graph ID of the symbol a FuncDecl defines.
+// Delegating to symbolID (rather than parsing fn.Recv's AST) keeps the
+// caller and callee sides of every method call in agreement, and picks up
+// generic receivers for free.
 func callerSymbolID(pkg *packages.Package, fn *ast.FuncDecl) string {
-	if fn.Recv == nil {
-		return pkg.PkgPath + "." + fn.Name.Name
-	}
-
-	if len(fn.Recv.List) == 0 {
+	obj := pkg.TypesInfo.Defs[fn.Name]
+	if obj == nil {
 		return ""
 	}
 
-	recvType := fn.Recv.List[0].Type
-
-	// Handle pointer receivers.
-	if star, ok := recvType.(*ast.StarExpr); ok {
-		recvType = star.X
-	}
-
-	if ident, ok := recvType.(*ast.Ident); ok {
-		return pkg.PkgPath + "." + ident.Name + "." + fn.Name.Name
-	}
-
-	return ""
+	return symbolID(obj)
 }
 
-// symbolID generates a unique identifier for a types.Object.
+// symbolID generates a unique identifier for a types.Object. Methods are
+// qualified by their receiver type ("pkg.Type.Method") so they never
+// collide with a package-level function of the same name. Anything that is
+// neither a method nor a package-level declaration (locals, parameters,
+// struct fields, type parameters, imported package names) returns "".
 func symbolID(obj types.Object) string {
-	if obj.Pkg() == nil {
-		return "" // Built-in, skip.
+	if obj == nil || obj.Pkg() == nil {
+		return "" // Nil or built-in, skip.
+	}
+
+	if fn, isMethod := methodOf(obj); isMethod {
+		return methodSymbolID(fn)
+	}
+
+	if !isPackageLevel(obj) {
+		return ""
 	}
 
 	return obj.Pkg().Path() + "." + obj.Name()
+}
+
+// methodOf reports whether obj is a method (a *types.Func with a non-nil
+// receiver) and returns it.
+func methodOf(obj types.Object) (*types.Func, bool) {
+	fn, ok := obj.(*types.Func)
+	if !ok || fn.Signature().Recv() == nil {
+		return nil, false
+	}
+
+	return fn, true
+}
+
+// methodSymbolID builds the receiver-qualified ID for a method, e.g.
+// "pkg/path.Type.Method". Returns "" when the receiver type is unnamed
+// (anonymous interface methods have no declaration file to attribute to).
+func methodSymbolID(fn *types.Func) string {
+	named := namedRecvType(fn.Signature().Recv().Type())
+	if named == nil {
+		return ""
+	}
+
+	return fn.Pkg().Path() + "." + named.Obj().Name() + "." + fn.Name()
+}
+
+// ownerTypeID returns the graph ID of the named type that owns a field
+// selection, e.g. "pkg/path.Type". For a promoted (embedded) field this is
+// the outer type, not the type declaring the field -- trackTypeSpecUsages
+// already records outer -> inner from the embedding, so the caller reaches
+// the declaring file transitively. Returns "" when t is not backed by a
+// named type (an anonymous struct, for instance).
+func ownerTypeID(t types.Type) string {
+	named := namedRecvType(t)
+	if named == nil || named.Obj().Pkg() == nil {
+		return ""
+	}
+
+	return named.Obj().Pkg().Path() + "." + named.Obj().Name()
+}
+
+// namedRecvType unwraps a receiver-like type (an optional pointer around a
+// possibly-generic named type) down to its origin *types.Named, so a call
+// on Stack[int] and the declaration of Stack[T] agree on the same type.
+// Returns nil when t is not backed by a named type.
+func namedRecvType(t types.Type) *types.Named {
+	t = types.Unalias(t)
+
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = types.Unalias(ptr.Elem())
+	}
+
+	named, ok := t.(*types.Named)
+	if !ok {
+		return nil
+	}
+
+	return named.Origin()
+}
+
+// isPackageLevel reports whether obj is declared directly in its package
+// scope, excluding locals, parameters, type parameters, and struct fields.
+func isPackageLevel(obj types.Object) bool {
+	return obj.Parent() == obj.Pkg().Scope()
 }

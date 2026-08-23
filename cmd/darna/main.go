@@ -88,7 +88,9 @@ func main() {
 // runSingleChangesetCheck runs the changeset detection pass and returns true
 // when the staged files form zero or one changeset. Returns false (with a
 // message printed to stderr on error, or the changeset list to stdout on
-// split) so the caller can exit non-zero.
+// split) so the caller can exit non-zero. A split can be overridden per
+// invocation with DARNA_ALLOW_MULTI_CHANGESET, since the check is static
+// analysis and cannot see runtime coupling.
 func runSingleChangesetCheck(ctx context.Context, workDir string) bool {
 	changesets, err := validator.DetectChangesets(ctx, workDir)
 	if err != nil {
@@ -97,13 +99,34 @@ func runSingleChangesetCheck(ctx context.Context, workDir string) bool {
 		return false
 	}
 
-	if len(changesets) > 1 {
-		printChangesets(os.Stdout, changesets)
-
-		return false
+	if len(changesets) <= 1 {
+		return true
 	}
 
-	return true
+	printChangesets(os.Stdout, changesets)
+
+	if allowMultiChangeset(os.Getenv) {
+		writeString(os.Stderr, fmt.Sprintf(
+			"darna: multi-changeset check overridden by DARNA_ALLOW_MULTI_CHANGESET (%d changesets detected)\n",
+			len(changesets)))
+
+		return true
+	}
+
+	return false
+}
+
+// allowMultiChangeset reports whether DARNA_ALLOW_MULTI_CHANGESET (read via
+// getenv, injected so tests need not touch process environment) opts out of
+// the -single-changeset split failure. Accepts "1", "true", or "yes"
+// case-insensitively; anything else, including unset, is off.
+func allowMultiChangeset(getenv func(string) string) bool {
+	switch strings.ToLower(getenv("DARNA_ALLOW_MULTI_CHANGESET")) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
 }
 
 var errNoStagedChanges = errors.New("no staged changes (stage files with git add first)")
@@ -191,9 +214,13 @@ func groupByMissingFile(violations []validator.Violation) map[string][]validator
 
 func printChangesets(w io.Writer, changesets [][]string) {
 	writeString(w, fmt.Sprintf(
-		"Commit is atomic but contains %d independent changesets. Split into separate commits:\n\n",
+		"Commit is atomic but appears to contain %d independent changesets.\n\n",
 		len(changesets),
 	))
+	writeString(w, "darna found no compile-time dependency between these groups. It cannot see\n")
+	writeString(w, "runtime coupling: string keys, reflection, build tags, go:generate output,\n")
+	writeString(w, "table-driven test data, or init-order effects. If these files really belong\n")
+	writeString(w, "together, this is a false positive.\n\n")
 
 	for i, group := range changesets {
 		writeString(w, fmt.Sprintf("  Changeset %d:\n", i+1))
@@ -205,11 +232,14 @@ func printChangesets(w io.Writer, changesets [][]string) {
 		writeString(w, "\n")
 	}
 
-	writeString(w, "To fix, run:\n")
+	writeString(w, "If they are separate concerns, split them:\n")
 	writeString(w, "   git reset\n")
 
 	for _, group := range changesets {
 		writeString(w, "   git add "+strings.Join(group, " ")+"\n")
 		writeString(w, "   git commit -m \"...\"\n")
 	}
+
+	writeString(w, "\nIf they belong together, keep the commit as is:\n")
+	writeString(w, "   DARNA_ALLOW_MULTI_CHANGESET=1 git commit ...\n")
 }
