@@ -260,6 +260,34 @@ func (r *Rec) Emit() int {
 	}
 }
 
+func TestAnalyzePackage_MethodDependsOnReceiverType(t *testing.T) {
+	t.Parallel()
+
+	g := loadGraph(t, map[string]string{
+		"rec.go": `package testpkg
+
+type Rec struct {
+	Baz int
+}
+`,
+		"emit.go": `package testpkg
+
+func (r *Rec) Emit() int {
+	return 0
+}
+`,
+	})
+
+	const (
+		emitID = "testpkg.Rec.Emit"
+		recID  = "testpkg.Rec"
+	)
+
+	if _, ok := g.OutEdges[emitID][recID]; !ok {
+		t.Errorf("Expected %s to depend on its receiver type %s, deps: %v", emitID, recID, g.OutEdges[emitID])
+	}
+}
+
 func TestAnalyzePackage_MethodNameCollisionNoFalseEdge(t *testing.T) {
 	t.Parallel()
 

@@ -249,6 +249,17 @@ func collectValueSpecCallerIDs(pkg *packages.Package, vs *ast.ValueSpec) []strin
 func (g *DependencyGraph) trackFuncBodyUsages(
 	pkg *packages.Package, callerID string, fn *ast.FuncDecl,
 ) {
+	// Track usages in the receiver, so a method depends on its receiver
+	// type (staging emit.go without its unstaged receiver type is a real
+	// atomicity violation).
+	if fn.Recv != nil {
+		ast.Inspect(fn.Recv, func(inner ast.Node) bool {
+			g.recordUsage(pkg, callerID, inner)
+
+			return true
+		})
+	}
+
 	// Track usages in function signature (parameter and return types).
 	ast.Inspect(fn.Type, func(inner ast.Node) bool {
 		g.recordUsage(pkg, callerID, inner)

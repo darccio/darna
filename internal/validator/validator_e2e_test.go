@@ -847,6 +847,49 @@ func TestValidateAtomicCommit_SpecificSymbol_Method(t *testing.T) {
 	}
 }
 
+// TestValidateAtomicCommit_MethodOnUnstagedReceiverType reproduces the
+// reported false negative: emit.go's only coupling to logic.go is its
+// method receiver type (no type literal, no field access), which
+// trackFuncBodyUsages did not inspect before this fix.
+func TestValidateAtomicCommit_MethodOnUnstagedReceiverType(t *testing.T) {
+	t.Parallel()
+
+	logTestPattern(t,
+		"Method Depends On Unstaged Receiver Type",
+		"emit.go (func (e *Emitter) Emit()) -> logic.go (type Emitter struct{})",
+		"Modified [emit.go, logic.go] | Staged [emit.go] | Unstaged [logic.go]",
+		"Violation tracking receiver type: Emitter.Emit -> Emitter")
+
+	repoDir := setupTestRepo(t)
+
+	createUntrackedFile(t, repoDir, "logic.go", "package main\n\ntype Emitter struct{}\n")
+	createUntrackedFile(t, repoDir, "emit.go", "package main\n\nfunc (e *Emitter) Emit() {}\n")
+	stageFiles(t, repoDir, "logic.go", "emit.go")
+	runGit(t, repoDir, "commit", "-m", "Add Emitter and Emit")
+
+	modifyFile(t, filepath.Join(repoDir, "emit.go"), testComment)
+	modifyFile(t, filepath.Join(repoDir, "logic.go"), testComment)
+	stageFiles(t, repoDir, "emit.go")
+
+	violations, err := validator.ValidateAtomicCommit(t.Context(), repoDir)
+	if err != nil {
+		t.Fatalf("ValidateAtomicCommit failed: %v", err)
+	}
+
+	found := false
+
+	for _, v := range violations {
+		if v.StagedFile == "emit.go" && v.MissingFile == "logic.go" &&
+			v.MissingSymbol == "example.com/testproject.Emitter" {
+			found = true
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected violation tracking Emitter.Emit -> Emitter, violations: %+v", violations)
+	}
+}
+
 func TestValidateAtomicCommit_MultipleSymbols_PartialViolation(t *testing.T) {
 	t.Parallel()
 
