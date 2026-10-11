@@ -263,6 +263,10 @@ and `coverage.html` as artifacts.
 
 ## Documentation
 
+The [documentation source](docs/index.md) is published at [dario.cat/darna](https://dario.cat/darna/). Architecture decisions remain in [docs/decisions](docs/decisions) and are linked from the guide.
+
+Docs changes on `main` and published releases request a pinned source update in the site repository. A reviewed site pull request must be merged before Cloudflare Pages deploys the update. Configure `SITE_DISPATCH_TOKEN` as described in [the dispatch workflow](.github/workflows/docs-dispatch.yml); without it, the workflow reports a notice and skips dispatch.
+
 For design rationale and implementation details of commit message generation, see [ADR-002: LLM-powered commit message generation](docs/decisions/002.md).
 
 ## License
